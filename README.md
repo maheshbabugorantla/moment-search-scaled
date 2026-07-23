@@ -29,6 +29,12 @@
 > work queue**, and answer one question with **cited moments across every source**
 > — the video timestamp *and* the paper page *and* the deck slide.
 
+> 🤖👀 **Read this yourself.** This is a *reading* assignment first — course policy
+> **MS-3.14**. There's a tripwire in here for anyone who just points a coding agent
+> at the repo and says "do it" without reading. Read the whole thing and you'll never
+> trip it (and you'll build the system far better). Skim it with a robot instead
+> and… well, we'll know. 🦥
+
 You are given a **working production app**:
 [**traversaal-ai/momentsearch**](https://github.com/traversaal-ai/momentsearch)
 — an admin API that registers YouTube videos, a **queue-driven worker** that turns
