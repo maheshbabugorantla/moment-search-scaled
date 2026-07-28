@@ -375,6 +375,32 @@ test passes vacuously if the token is unset.
 **7. Registration returns `video_id`, not `id`** (`api/videos.py:147`), and the
 fair-dispatch path returns no `flow_run_id`.
 
+**8. A re-ingest can silently destroy the text branch.** *Observed, not
+theorised.* `t_embed_index` calls `vector_store.delete_video`
+(`pipeline.py:100`), which purges the video from **both** collections
+(`vector_store.py:212-219`). `t_transcript` then re-indexes the text — but it is
+best-effort by design and swallows every failure into "visual-only"
+(`pipeline.py:152-154`). Re-registering the four sample talks triggered YouTube's
+bot-check on the *subtitle* fetch (the video downloads themselves succeeded), so
+all four transcript stages returned 0 and the run still finished `indexed`. Net
+effect: `moments_text` went from 354 points to **0**, every source reported
+healthy, and search silently degraded to visual-only. Recovered by re-running
+just the transcript stage once the rate-limit cleared.
+
+Two consequences for this assignment:
+
+- `moments_text` is where paper and deck chunks will live. A stage that can empty
+  it while reporting success is a recall failure with no error to find. Anything
+  that re-ingests a source needs the delete to be scoped, or the re-index to be
+  mandatory rather than best-effort.
+- `indexed` currently means "the visual branch upserted", not "everything this
+  source should contribute is in the index". Any definition of done for documents
+  has to be stricter than the one video uses.
+
+The documented mitigation for the bot-check is cookies —
+`YT_COOKIES_FILE=/app/data/cookies.txt` (`config.py:229`, `.env.example:119-127`);
+worth setting before any large YouTube backfill.
+
 ---
 
 ## 10. Consequences for the Assignment-3 plan
