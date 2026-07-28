@@ -14,6 +14,7 @@ fetch actually happens.
 from __future__ import annotations
 
 import hashlib
+import logging
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -21,7 +22,10 @@ from pydantic import BaseModel
 
 from .. import db
 from ..config import SOURCE_KINDS, SOURCE_STATUSES
+from .errors import UpstreamError
 from .videos import require_auth, user_id
+
+log = logging.getLogger("momentsearch.admin")
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -68,10 +72,18 @@ def register_document(req: DocumentRequest, uid: str = Depends(user_id)):
     """Accept a paper or a deck. Returns before any parsing happens."""
     uri = _validate(req)
     doc_id = document_id(uri)
-    row = db.upsert_pending_document({
-        "id": doc_id, "user_id": uid, "kind": req.kind, "uri": uri,
-        "title": req.title,
-    })
+    try:
+        row = db.upsert_pending_document({
+            "id": doc_id, "user_id": uid, "kind": req.kind, "uri": uri,
+            "title": req.title,
+        })
+    except Exception as exc:
+        # The manifest write is the one upstream this path genuinely depends
+        # on. Its failure is theirs, not ours — 502, and traceable by source id.
+        log.error("enqueue failed for %s (%s): %s", doc_id, uri, exc)
+        raise UpstreamError(
+            "Could not record the source — the manifest database is unavailable.",
+            source_id=doc_id) from exc
     return {"id": row["id"], "status": row["status"], "kind": row["kind"]}
 
 
