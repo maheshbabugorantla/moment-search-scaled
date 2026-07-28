@@ -454,20 +454,57 @@ Every FDE project is submitted as a **Product Evaluation + a video demo**.
 
 ## About this repo
 
-This is a standalone mirror of `FDE/Assignment_3_Moment_Search_Scaled` from
-[`hamzafarooq/multi-agent-course`](https://github.com/hamzafarooq/multi-agent-course),
-split out with `git subtree split` so the history here only contains commits that
-touch this assignment, with its files at the repo root.
+This repo holds **both** halves of Assignment 3: the brief you are reading, and the
+working application it extends.
+
+| Path | What it is | Where it came from |
+|------|-----------|--------------------|
+| `README.md`, `AGENTS.md` | the assignment brief and its hard rules | `hamzafarooq/multi-agent-course`, `FDE/Assignment_3_Moment_Search_Scaled` |
+| `benchmark/`, `eval/`, `.claude/skills/` | the SLA gate and the grading harness | same |
+| `src/`, `ui/`, `Dockerfile`, `docker-compose.yml`, `fly.toml` | the MomentSearch app | [`traversaal-ai/momentsearch`](https://github.com/traversaal-ai/momentsearch) |
+| `docs/MOMENTSEARCH.md` | upstream's app README | same |
+| `docs/NOTES-architecture.md` | read-through of the app as it actually is | written here |
+
+The brief half was split out of the course repo with `git subtree split`; the app was
+merged in with `--allow-unrelated-histories`, so **both** histories are preserved and
+either upstream can still be synced.
+
+### Remotes
 
 - `origin` → this repo (`maheshbabugorantla/moment-search-scaled`) — push here as normal.
-- `upstream` → the original course repo — fetch-only, used to pull in assignment updates.
+- `upstream` → the course repo — fetch-only, for updates to the assignment itself.
+- `momentsearch` → `traversaal-ai/momentsearch` — fetch-only, for updates to the app.
 
-**Syncing updates from upstream** (course repo history and this repo's history are
-unrelated after the split, so a plain `git pull` won't work):
+### Syncing
+
+Assignment updates (histories are unrelated after the split, so plain `git pull` won't work):
 
 ```bash
 git fetch upstream
 git subtree split --prefix=FDE/Assignment_3_Moment_Search_Scaled --onto <last-synced-sha> -b upstream-sync upstream/main
-git rebase upstream-sync main   # or: git merge upstream-sync
+git merge upstream-sync
 git branch -D upstream-sync
 ```
+
+App updates:
+
+```bash
+git fetch momentsearch
+git merge momentsearch/main
+```
+
+### Running it
+
+The app needs four managed services — see `.env.example`. Copy it to `.env`, fill in
+`DATABASE_URL` (Neon), `PREFECT_API_URL`/`PREFECT_API_KEY`, `QDRANT_URL`/`QDRANT_API_KEY`,
+`LLM_API_KEY`, and an `ADMIN_TOKEN`, then:
+
+```bash
+docker compose up --build          # UI on http://localhost:8000
+python scripts/check_env.py        # verify every dependency is reachable (see the file header)
+```
+
+> **Note:** the app serves port **8000** and exposes `/api/videos` and `/api/ask`. The
+> contract described above (`:8100`, `/admin/*`, `/ask_stream`) does not exist yet —
+> building it is part of the assignment. `docs/NOTES-architecture.md` maps what is
+> actually there.
