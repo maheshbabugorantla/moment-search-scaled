@@ -472,3 +472,25 @@ Every FDE project is submitted as a **Product Evaluation + a video demo**.
   compose up` should start one; check `worker.py` logs and your `PREFECT_API_*` keys.
 - **Everything is video and nothing else appears** → confirm your new flow upserts to
   the **same** collection with a `kind` payload, and that retrieval isn't filtering it out.
+
+---
+
+## About this repo
+
+This is a standalone mirror of `FDE/Assignment_3_Moment_Search_Scaled` from
+[`hamzafarooq/multi-agent-course`](https://github.com/hamzafarooq/multi-agent-course),
+split out with `git subtree split` so the history here only contains commits that
+touch this assignment, with its files at the repo root.
+
+- `origin` → this repo (`maheshbabugorantla/moment-search-scaled`) — push here as normal.
+- `upstream` → the original course repo — fetch-only, used to pull in assignment updates.
+
+**Syncing updates from upstream** (course repo history and this repo's history are
+unrelated after the split, so a plain `git pull` won't work):
+
+```bash
+git fetch upstream
+git subtree split --prefix=FDE/Assignment_3_Moment_Search_Scaled --onto <last-synced-sha> -b upstream-sync upstream/main
+git rebase upstream-sync main   # or: git merge upstream-sync
+git branch -D upstream-sync
+```
