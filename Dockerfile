@@ -24,6 +24,9 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 
 COPY src/ src/
 COPY ui/ ui/
+# init_schema() applies these on every boot — they must be in the image, not
+# just bind-mounted in dev.
+COPY migrations/ migrations/
 
 EXPOSE 8000
 CMD ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,12 +1,29 @@
-"""Postgres (Neon) access layer — the videos manifest, source of truth.
+"""Postgres (Neon) access layer — the source manifest, source of truth.
 
-One row per (user's) video; `status` tracks the ingest lifecycle:
-pending -> fetching -> sampling -> embedding -> indexed | skipped | failed
+One row per (user's) source; `status` tracks the ingest lifecycle:
+pending -> queued -> fetching -> sampling -> embedding -> indexed | skipped | failed
 (skipped = duplicate (user_id, source_hash); indexed = searchable in Qdrant).
+
+The table is still named `ms_videos` — renaming it would break nothing but buys
+nothing either, and a rename is the one migration that cannot be rolled back
+without downtime. `kind` (video | paper | deck) is what distinguishes rows now.
+
+Two column pairs look redundant and are not. Both were left split deliberately:
+
+* `uri` vs `url` — `uri` is the unified source location for every kind. For a
+  video it is *derived* from `url`/`storage_key`; `url` remains the column the
+  deeplink builder (rag/search.py) and the transcript fetcher (ingest/pipeline.py)
+  read. Collapsing them would change the video contract, which is a rubric red
+  line, for no gain.
+* `pct` vs `progress` — `pct` is integer 0-100 across all kinds; `progress` is
+  the REAL 0..1 within-stage value the video flow already writes and the UI
+  already renders. The worker starts writing `pct` in REC-310; until then
+  `progress` stays authoritative for video.
 """
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -70,9 +87,22 @@ CREATE TABLE IF NOT EXISTS ms_user_llms (
 """
 
 
+# Migrations live as .sql next to the app rather than in a framework — there
+# are few of them and they must run on a plain `compose up`. Each is written to
+# be re-runnable, because init_schema() is called by app.py, worker.py and
+# seeding.py on every boot.
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+
+
+def _migrations() -> list[Path]:
+    return sorted(MIGRATIONS_DIR.glob("*.up.sql"))
+
+
 def init_schema() -> None:
     with pool().connection() as conn:
         conn.execute(SCHEMA)
+        for path in _migrations():
+            conn.execute(path.read_text())
 
 
 def upsert_pending(video: dict[str, Any]) -> dict:
