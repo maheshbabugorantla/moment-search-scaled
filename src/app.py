@@ -1,8 +1,9 @@
 """MomentSearch — unified API (one service, one port).
 
-Two routers on one FastAPI app (:8000):
+Three routers on one FastAPI app (:8000):
   - src/api/videos.py  /api/videos/*  — presigned uploads + registration +
                                         ingest status (Bearer auth)
+  - src/api/admin.py   /admin/*       — paper and deck registration (Bearer auth)
   - src/api/search.py  public         — / (web UI), /api/ask, /api/config,
                                         local-dev media, /api/health
 
@@ -21,6 +22,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from . import config, db
+from .api.admin import router as admin_router
 from .api.search import router as search_router
 from .api.videos import router as videos_router
 from .rag import vector_store
@@ -43,4 +45,5 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MomentSearch", version="1.0.0", lifespan=lifespan)
 app.include_router(videos_router)
+app.include_router(admin_router)
 app.include_router(search_router)
