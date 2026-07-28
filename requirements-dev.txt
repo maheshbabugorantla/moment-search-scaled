@@ -1,0 +1,6 @@
+# Test-only dependencies. Installed into the image (it already carries torch —
+# a few MB of test tooling is not the thing to optimise), but tests/ itself is
+# bind-mounted rather than COPYed, so the deployed image ships no test code and
+# editing a test needs no rebuild.
+pytest>=8.0
+httpx>=0.27

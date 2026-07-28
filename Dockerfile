@@ -15,11 +15,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY requirements.txt requirements-dev.txt ./
 # CPU-only torch first: the default Linux wheel drags in ~6GB of CUDA libs
 # that CLIP-on-CPU never uses.
 RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
- && pip install --no-cache-dir -r requirements.txt
+ && pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir -r requirements-dev.txt
 
 COPY src/ src/
 COPY ui/ ui/
