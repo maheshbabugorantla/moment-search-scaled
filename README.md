@@ -508,3 +508,20 @@ python scripts/check_env.py        # verify every dependency is reachable (see t
 > contract described above (`:8100`, `/admin/*`, `/ask_stream`) does not exist yet —
 > building it is part of the assignment. `docs/NOTES-architecture.md` maps what is
 > actually there.
+
+### Tests
+
+`tests/test_video_contract.py` pins the video behaviour that must survive every
+later PR — endpoint shapes, auth, the citation payload the UI seeks on. Run it
+against a stack that is already up:
+
+```bash
+docker compose run --rm tests              # all of it
+docker compose run --rm tests pytest -m "not mutating"   # strictly read-only
+```
+
+The suite is black-box (HTTP against the running API), so it guards the wire
+contract rather than Python signatures. It never re-registers a corpus video:
+re-ingesting one purges both Qdrant collections up front and a transcript
+failure is swallowed into "visual-only", so a YouTube bot-check mid-test would
+silently empty the text branch while the row still reported `indexed`.
