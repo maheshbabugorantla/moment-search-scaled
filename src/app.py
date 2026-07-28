@@ -23,6 +23,7 @@ from fastapi import FastAPI
 
 from . import config, db
 from .api.admin import router as admin_router
+from .api.errors import register as register_error_handlers
 from .api.search import router as search_router
 from .api.videos import router as videos_router
 from .rag import vector_store
@@ -47,3 +48,6 @@ app = FastAPI(title="MomentSearch", version="1.0.0", lifespan=lifespan)
 app.include_router(videos_router)
 app.include_router(admin_router)
 app.include_router(search_router)
+
+# JSON error envelope — scoped to /admin/*; the UI reads `detail` on the others.
+register_error_handlers(app)
