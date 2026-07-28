@@ -126,6 +126,32 @@ def upsert_pending(video: dict[str, Any]) -> dict:
     return row
 
 
+def upsert_pending_document(doc: dict[str, Any]) -> dict:
+    """Insert a paper/deck as pending; re-submitting the same URI resets it.
+
+    Deliberately separate from upsert_pending() rather than a widened version of
+    it: the video INSERT is under a contract test and there is no reason to put
+    documents' columns through it. `source` is set to the kind so the existing
+    NOT NULL holds without inventing a fake 'youtube'/'upload' value.
+    """
+    with pool().connection() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO ms_videos (id, user_id, source, kind, uri, title, status)
+            VALUES (%(id)s, %(user_id)s, %(kind)s, %(kind)s, %(uri)s, %(title)s, 'pending')
+            ON CONFLICT (id) DO UPDATE SET
+                uri = COALESCE(EXCLUDED.uri, ms_videos.uri),
+                kind = EXCLUDED.kind,
+                title = COALESCE(EXCLUDED.title, ms_videos.title),
+                status = 'pending', error = NULL, progress = NULL, pct = 0,
+                stage = NULL, updated_at = now()
+            RETURNING *
+            """,
+            doc,
+        ).fetchone()
+    return row
+
+
 def set_status(video_id: str, status: str, *, error: str | None = None,
                title: str | None = None, frame_count: int | None = None,
                source_hash: str | None = None, embed_version: str | None = None,
@@ -218,8 +244,14 @@ def count_inflight() -> int:
 
 
 def wfq_claim(limit: int) -> list[dict]:
-    """Atomically claim up to `limit` pending videos in FAIR (round-robin across
+    """Atomically claim up to `limit` pending VIDEOS in FAIR (round-robin across
     users) order, flipping them pending -> queued. Returns the claimed rows.
+
+    Scoped to kind='video'. The dispatcher hands whatever it claims to
+    jobs.enqueue_video(), so without this filter a pending paper would be
+    claimed and pushed through yt-dlp — failing with an incomprehensible error
+    on a row nothing had any business fetching. Documents wait `pending` until
+    their own flow exists (REC-309).
 
     Fairness: rank each user's pending videos by age (row_number partitioned by
     user_id), then order by that rank first — so we take everyone's oldest, then
@@ -235,7 +267,7 @@ def wfq_claim(limit: int) -> list[dict]:
             SELECT id FROM (
                 SELECT id, row_number() OVER (
                     PARTITION BY user_id ORDER BY created_at, id) AS rn
-                FROM ms_videos WHERE status = 'pending'
+                FROM ms_videos WHERE status = 'pending' AND kind = 'video'
             ) t
             ORDER BY rn, id
             LIMIT %s
@@ -248,7 +280,7 @@ def wfq_claim(limit: int) -> list[dict]:
         return conn.execute(
             """
             UPDATE ms_videos SET status = 'queued', updated_at = now()
-            WHERE id = ANY(%s) AND status = 'pending'
+            WHERE id = ANY(%s) AND status = 'pending' AND kind = 'video'
             RETURNING id, user_id
             """,
             (ids,),
