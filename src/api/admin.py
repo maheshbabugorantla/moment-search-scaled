@@ -16,11 +16,11 @@ from __future__ import annotations
 import hashlib
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .. import db
-from ..config import SOURCE_KINDS
+from ..config import SOURCE_KINDS, SOURCE_STATUSES
 from .videos import require_auth, user_id
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -73,3 +73,52 @@ def register_document(req: DocumentRequest, uid: str = Depends(user_id)):
         "title": req.title,
     })
     return {"id": row["id"], "status": row["status"], "kind": row["kind"]}
+
+
+# ── Unified status ────────────────────────────────────────────────────────────
+
+# What a source looks like from the outside, whatever its kind. Deliberately
+# narrower than the row: this is an admin status view, not a data dump.
+_SOURCE_FIELDS = ("id", "kind", "status", "title", "pct", "uri", "error",
+                  "created_at", "updated_at")
+
+MAX_PAGE = 500
+
+
+def _source(row: dict) -> dict:
+    out = {k: row.get(k) for k in _SOURCE_FIELDS}
+    # `pct` is NOT NULL DEFAULT 0 in the schema, but a row written before the
+    # migration backfilled could still surface None through a stale connection.
+    out["pct"] = out["pct"] or 0
+    return out
+
+
+@router.get("/sources", dependencies=[Depends(require_auth)])
+def list_sources(
+    uid: str = Depends(user_id),
+    kind: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=MAX_PAGE),
+    offset: int = Query(default=0, ge=0),
+):
+    """One read over the whole manifest, whatever the source kind.
+
+    Reports; it does not measure. `pct` renders whatever the column holds, and
+    nothing writes it yet (REC-310 does) — so an `indexed` source currently
+    reports `pct: 0`. Treat `status` as the completion signal, not `pct`, until
+    that lands.
+    """
+    if kind is not None and kind not in SOURCE_KINDS:
+        raise HTTPException(400, f"kind must be one of {', '.join(SOURCE_KINDS)}.")
+    if status is not None and status not in SOURCE_STATUSES:
+        raise HTTPException(400, f"status must be one of {', '.join(SOURCE_STATUSES)}.")
+    rows = db.list_sources(uid, kind=kind, status=status, limit=limit, offset=offset)
+    total = db.count_sources(uid, kind=kind, status=status)
+    return {
+        "sources": [_source(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        # Explicit rather than making the poll loop compare arithmetic.
+        "next_offset": offset + len(rows) if offset + len(rows) < total else None,
+    }
