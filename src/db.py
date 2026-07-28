@@ -217,6 +217,46 @@ def list_videos(user_id: str, status: str | None = None) -> list[dict]:
         return conn.execute(q, tuple(params)).fetchall()
 
 
+def list_sources(user_id: str, *, kind: str | None = None,
+                 status: str | None = None, limit: int = 100,
+                 offset: int = 0) -> list[dict]:
+    """Every source for a tenant, whatever its kind — the read behind
+    GET /admin/sources.
+
+    Ordering breaks ties on `id`. list_videos() orders on created_at alone,
+    which is unstable when rows share a timestamp — and they do, because a
+    backfill inserts many rows within the same clock tick. The resilience
+    harness pages through this in a poll loop, so an unstable sort would let a
+    row appear on two pages or none.
+    """
+    q = "SELECT * FROM ms_videos WHERE user_id = %s"
+    params: list = [user_id]
+    if kind:
+        q += " AND kind = %s"
+        params.append(kind)
+    if status:
+        q += " AND status = %s"
+        params.append(status)
+    q += " ORDER BY created_at DESC, id LIMIT %s OFFSET %s"
+    params += [limit, offset]
+    with pool().connection() as conn:
+        return conn.execute(q, tuple(params)).fetchall()
+
+
+def count_sources(user_id: str, *, kind: str | None = None,
+                  status: str | None = None) -> int:
+    q = "SELECT count(*) AS n FROM ms_videos WHERE user_id = %s"
+    params: list = [user_id]
+    if kind:
+        q += " AND kind = %s"
+        params.append(kind)
+    if status:
+        q += " AND status = %s"
+        params.append(status)
+    with pool().connection() as conn:
+        return conn.execute(q, tuple(params)).fetchone()["n"]
+
+
 def videos_by_ids(ids: list[str]) -> dict[str, dict]:
     """Metadata join for search citations (title/url/source live here, not in Qdrant)."""
     if not ids:
