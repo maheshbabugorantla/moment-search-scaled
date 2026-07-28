@@ -26,8 +26,14 @@ qdrant_storage/
 node_modules/
 dist/
 
-# Benchmark
-benchmark/
+# Benchmark — upstream ignores this wholesale; Assignment 3 requires the SLA
+# gate to be committed (it is the grading gate and a CI check). Track the
+# harness and its fixtures; keep generated results out.
+benchmark/*
+!benchmark/bench.py
+!benchmark/sla.json
+!benchmark/queries.jsonl
+!benchmark/README.md
 
 # Internal design notes (not published)
 MULTIMODAL_RETRIEVAL.md
