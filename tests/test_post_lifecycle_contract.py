@@ -73,7 +73,9 @@ def test_the_fixture_markdown_is_served(client: httpx.Client) -> None:
     r = client.get("/admin/fixtures/tiny.md")
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/markdown")
-    assert r.text.lstrip().startswith("#")
+    # Opens with prose, NOT a heading — that is what makes `_top` reachable.
+    assert not r.text.lstrip().startswith("#")
+    assert "\n# " in r.text and "\n## " in r.text
 
 
 def test_the_fixture_exercises_a_duplicate_heading(client: httpx.Client) -> None:
@@ -160,6 +162,46 @@ def test_the_indexed_points_carry_kind_post_and_plausible_anchors(
     # states whether its anchor can actually scroll the live post.
     assert all(isinstance(p["anchor_native"], bool) for p in payloads)
     assert all(p["text"].strip() for p in payloads)
+
+
+@pytest.mark.mutating
+def test_the_decorative_image_is_never_indexed(
+    client: httpx.Client, auth: dict, registered_post: str
+) -> None:
+    """The requirement REC-337 actually states, asserted from the outside: a
+    decorative image must never become citable.
+
+    The fixture's banner is 1200x100 — dropped by a shape rule (its 100px
+    height trips the minimum-dimension check before the aspect check is
+    reached) without the classifier being consulted at all, so this assertion
+    is deterministic and does not depend on what CLIP makes of a generated
+    PNG. The 600x400 chart clears every heuristic and scores 0.29 informative
+    against a 0.22 floor, so the keep path is live rather than vacuous — and
+    any surviving image must carry its verdict, keeping a future tuning
+    change auditable.
+    """
+    row, _, _ = _wait_for_terminal(client, auth, registered_post)
+    assert row.get("status") == "indexed", row.get("error")
+
+    from src.config import QDRANT_COLLECTION
+    from src.rag import vector_store
+
+    points, _ = vector_store.client().scroll(
+        collection_name=QDRANT_COLLECTION,
+        scroll_filter=vector_store._user_filter("default", registered_post),
+        limit=100, with_payload=True)
+
+    frames = [p.payload for p in points]
+    assert len(frames) <= 1, (
+        "the 1200x100 banner reached the index — the aspect rule did not fire")
+    for f in frames:
+        # .get, not [] — a scoping bug should surface as a readable assertion
+        # here, not as a KeyError against a video frame that carries no `kind`.
+        assert f.get("kind") == "post"
+        assert f.get("modality") == "frame"
+        assert f.get("img_class") == "informative"
+        assert isinstance(f.get("img_score"), float)
+        assert f.get("anchor"), "an indexed image with no anchor cannot be cited"
 
 
 # ── The flowless-kind guarantee still holds ──────────────────────────────────

@@ -31,7 +31,7 @@ from prefect import flow, task
 
 from .. import db
 from ..config import (POST_CHUNK_CHARS, POST_CHUNK_OVERLAP, POST_EMBED_BATCH,
-                      TEXT_EMBED_VERSION)
+                      POST_INDEX_IMAGES, TEXT_EMBED_VERSION)
 from ..rag import vector_store
 from ..rag.chunk import chunk_markdown
 from ..rag.embeddings import embed_docs
@@ -72,7 +72,7 @@ def t_fetch_post(doc_id: str, user_id: str) -> dict:
         raise SourceError(f"no manifest row for {doc_id}")
     handle = fetch_post(row["uri"], user_id, doc_id)
     handle["title"] = row.get("title") or ""
-    handle["uri"] = row["uri"]  # the deeplink fallback when there is no metadata
+    handle["uri"] = row["uri"]  # relative image refs resolve against it
     db.set_status(doc_id, "fetching", source_hash=handle["content_hash"],
                   storage_key=handle["storage_key"])
 
@@ -90,9 +90,8 @@ def t_parse_post(doc_id: str, path: str, title: str) -> dict:
     db.set_status(doc_id, "parsing")
     meta, body = split_frontmatter(read_markdown(Path(path)))
     # An exporter's front matter knows the canonical post URL; the registered
-    # URI may be a storage:// key no reader can follow, and the deeplink a
-    # citation renders is `{that url}#{anchor}`. Adopt the exported title too
-    # when the operator gave none.
+    # URI may be a storage:// key no reader can follow. Prefer the former for
+    # the deeplink, and adopt the exported title when the operator gave none.
     title = title or meta.get("title", "")
     sections = parse_markdown(body, title=title)
     if not any(s.paragraphs for s in sections):
@@ -115,16 +114,84 @@ def t_parse_post(doc_id: str, path: str, title: str) -> dict:
         "author": meta.get("author", ""),
         "sections": [{"anchor": s.anchor, "heading": s.heading,
                       "anchor_native": s.anchor_native,
-                      "paragraphs": list(s.paragraphs)} for s in sections],
+                      "paragraphs": list(s.paragraphs),
+                      "images": [{"url": i.url, "alt": i.alt,
+                                  "hero": i.before_first_heading and i.position == 0}
+                                 for i in s.images]} for s in sections],
     }
+
+
+@task(name="images-post")  # best-effort by contract — see the flow's call site
+def t_images_post(doc_id: str, user_id: str, sections: list[dict],
+                  base_uri: str = "") -> int:
+    """Worthiness-gate the post's images and index the survivors.
+
+    Kept images go into the CLIP collection through the SAME frame_key layout
+    video thumbnails use, so every existing thumbnail and citation-rendering
+    path works on a post without knowing posts exist.
+
+    Never raises. An image is an enhancement; a post whose chart failed to
+    download is still a correctly indexed post, and this stage carries no
+    retries. That is the transcript branch's contract, for the same reason.
+    """
+    refs = [(s["anchor"], img) for s in sections for img in s.get("images", ())]
+    if not POST_INDEX_IMAGES or not refs:
+        return 0
+    try:
+        import numpy as np
+
+        from .. import storage
+        from ..config import EMBED_VERSION
+        from . import post_images
+
+        prompts = post_images.prompt_bank()
+        kept: list[tuple[int, str, bytes, post_images.Verdict]] = []
+        for idx, (anchor, img) in enumerate(refs):
+            url = post_images.resolve(img["url"], base_uri)
+            verdict = post_images.judge(url, alt=img.get("alt", ""),
+                                        hero=bool(img.get("hero")),
+                                        prompts=prompts)
+            mark = "keep" if verdict.keep else "drop"
+            print(f"[images] {doc_id} #{anchor} {mark}: {verdict.reason} "
+                  f"— {url[:80]}")
+            if verdict.keep:
+                kept.append((idx, anchor, verdict.jpeg, verdict))
+        if not kept:
+            return 0
+
+        storage.delete_prefix(storage.frame_prefix(user_id, doc_id))
+        for idx, anchor, jpeg, _ in kept:
+            storage.put_bytes(storage.frame_key(user_id, doc_id, idx), jpeg,
+                              "image/jpeg")
+        vector_store.ensure_collection()
+        # Reuse the vectors the classifier already computed — the alternative
+        # is a second CLIP pass over the same bytes for no new information.
+        vectors = np.stack([v.vector for _, _, _, v in kept])
+        vector_store.upsert_frames(
+            user_id, doc_id,
+            ids=[idx for idx, _, _, _ in kept],
+            vectors=vectors,
+            payloads=[{"user_id": user_id, "video_id": doc_id, "kind": "post",
+                       "modality": "frame", "anchor": anchor, "idx": idx,
+                       "img_class": v.img_class, "img_score": v.img_score,
+                       "embed_version": EMBED_VERSION}
+                      for idx, anchor, _, v in kept],
+        )
+        print(f"[images] {doc_id}: {len(kept)}/{len(refs)} image(s) indexed")
+        return len(kept)
+    except Exception as exc:
+        print(f"[images] {doc_id}: failed ({type(exc).__name__}: {exc}) "
+              "— text-only")
+        return 0
 
 
 @task(name="chunk-post")  # no retries — pure function of the parse output
 def t_chunk_post(doc_id: str, sections: list[dict]) -> list[dict]:
     db.set_status(doc_id, "chunking")
-    chunks = chunk_markdown([_Section(**s) for s in sections],
-                            max_chars=POST_CHUNK_CHARS,
-                            overlap_chars=POST_CHUNK_OVERLAP)
+    chunks = chunk_markdown(
+        [_Section(s["anchor"], s["heading"], s["anchor_native"],
+                  s["paragraphs"]) for s in sections],
+        max_chars=POST_CHUNK_CHARS, overlap_chars=POST_CHUNK_OVERLAP)
     if not chunks:
         raise RuntimeError("chunking produced nothing despite parsed prose")
     print(f"[chunk] {doc_id}: {len(sections)} sections -> {len(chunks)} chunks")
@@ -156,7 +223,7 @@ def t_embed_upsert_post(doc_id: str, user_id: str, chunks: list[dict],
                        "kind": "post", "modality": "text",
                        "anchor": c["anchor"], "heading": c["heading"],
                        "anchor_native": c["anchor_native"],
-                       # The deeplink Epic 4 renders is source_url#anchor.
+                       # The deeplink Epic 4 will render is source_url#anchor.
                        # Stored per point so a citation needs no second read.
                        "source_url": source_url,
                        "text": c["text"], "embed_version": TEXT_EMBED_VERSION}
@@ -190,9 +257,16 @@ def ingest_post(doc_id: str, user_id: str) -> dict:
         chunks = t_chunk_post(doc_id, sections)
         n = t_embed_upsert_post(doc_id, user_id, chunks,
                                 parsed["source_url"] or handle["uri"])
+        # Images AFTER the text upsert, not inside parse where they logically
+        # belong: t_embed_upsert_post opens with delete_video(), which purges
+        # BOTH collections to clear a previous run's points. Classifying first
+        # would index images and then delete them. The video flow orders its
+        # transcript branch after embed-index for exactly this reason.
+        img = t_images_post(doc_id, user_id, sections, handle["uri"])
         print(f"[ingest-post] {doc_id} indexed: {len(sections)} sections, "
-              f"{n} chunks (attempt {attempt})")
-        return {"doc_id": doc_id, "sections": len(sections), "chunks": n}
+              f"{n} chunks + {img} image(s) (attempt {attempt})")
+        return {"doc_id": doc_id, "sections": len(sections), "chunks": n,
+                "images": img}
     except Exception as exc:
         db.set_status(doc_id, "failed", error=f"{type(exc).__name__}: {exc}")
         raise  # Prefect marks the run Failed; full trace in the Cloud UI

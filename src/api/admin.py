@@ -17,7 +17,7 @@ import hashlib
 import logging
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -171,16 +171,24 @@ def fixture_pdf() -> Response:
     return Response(content=body, media_type="application/pdf")
 
 
-# Three sections, one DUPLICATE heading (so the -1 suffix is exercised end to
-# end), one bold pseudo-heading, and two images whose URLs alone tell the
-# heuristic filter what they are. Deliberately not a lorem dump: the lifecycle
-# test asserts on the anchors this produces.
-_FIXTURE_POST = """# MomentSearch fixture post
+# Prose before any heading (so `_top` is exercised end to end), a DUPLICATE
+# heading (so the -1 suffix is), a bold pseudo-heading, a position-0 banner and
+# an in-body chart. Deliberately not a lorem dump:
+# the lifecycle test asserts on the anchors and the image verdicts this
+# produces. The image URLs are interpolated from the REQUEST's base URL, so the
+# worker (which reaches the API as http://api:8000) fetches them from the same
+# host it fetched the markdown from — no external network anywhere.
+_FIXTURE_POST = """A dateline and standfirst, the way an exported post opens
+before its title heading. This prose belongs to no heading, so the parser files
+it under the `_top` pseudo-anchor — which every renderer resolves, because it
+is the page itself.
 
-An opening paragraph before any second-level heading, which the parser files
-under the `_top` pseudo-anchor because every renderer resolves the page itself.
+![decorative banner]({base}admin/fixtures/banner.png)
 
-![decorative banner](https://example.invalid/fixtures/banner-1200x100.png)
+# MomentSearch fixture post
+
+The opening paragraph under the title, which carries the title's own anchor
+rather than the `_top` one above it.
 
 ## Retrieval
 
@@ -188,7 +196,7 @@ Retrieval augmented generation combines a retriever with a generator so that
 answers cite their sources instead of asserting them. The retriever decides
 what the generator is allowed to know.
 
-![a chart of recall against corpus size](https://example.invalid/fixtures/chart-600x400.png)
+![a chart of recall against corpus size]({base}admin/fixtures/chart.png)
 
 ## Fusion
 
@@ -211,11 +219,53 @@ and Substack both produce.
 
 
 @router.get("/fixtures/tiny.md")
-def fixture_markdown() -> Response:
+def fixture_markdown(request: Request) -> Response:
     """A tiny markdown post — the post lifecycle contract test registers THIS
     URL so a real end-to-end ingest needs no external network.
 
     Unauthenticated for the same reason as tiny.pdf: the worker's fetch sends
     no bearer token, and the content is fixture text.
     """
-    return Response(content=_FIXTURE_POST, media_type="text/markdown")
+    return Response(content=_FIXTURE_POST.format(base=request.base_url),
+                    media_type="text/markdown")
+
+
+def _fixture_png(width: int, height: int) -> bytes:
+    """A plain chart-like raster: light ground, gridlines, a rising series.
+
+    Generated rather than committed — no binary fixtures in git, and the shape
+    is the point. 1200x100 is what a Substack section divider looks like to
+    the heuristic layer; 600x400 is what a figure looks like.
+    """
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (width, height), (252, 252, 250))
+    draw = ImageDraw.Draw(img)
+    step = max(8, width // 12)
+    for x in range(0, width, step):
+        draw.line([(x, 0), (x, height)], fill=(216, 216, 216))
+    for y in range(0, height, max(8, height // 8)):
+        draw.line([(0, y), (width, y)], fill=(216, 216, 216))
+    draw.line([(0, height - 1), (width, height - 1)], fill=(40, 40, 40), width=2)
+    draw.line([(1, 0), (1, height)], fill=(40, 40, 40), width=2)
+    series = [(x, height - 4 - int((height - 12) * (x / max(1, width)) ** 0.6))
+              for x in range(0, width, max(2, width // 60))]
+    draw.line(series, fill=(30, 90, 200), width=3)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+@router.get("/fixtures/banner.png")
+def fixture_banner() -> Response:
+    """1200x100 — dropped by the aspect-ratio rule before the classifier ever
+    sees it, which is the deterministic half of the image gate."""
+    return Response(content=_fixture_png(1200, 100), media_type="image/png")
+
+
+@router.get("/fixtures/chart.png")
+def fixture_chart() -> Response:
+    """600x400 — clears every heuristic, so its fate is the classifier's."""
+    return Response(content=_fixture_png(600, 400), media_type="image/png")

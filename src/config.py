@@ -125,6 +125,30 @@ POST_CHUNK_CHARS = _int("POST_CHUNK_CHARS", 1400)
 POST_CHUNK_OVERLAP = _int("POST_CHUNK_OVERLAP", 200)
 POST_EMBED_BATCH = _int("POST_EMBED_BATCH", 64)
 
+# Image worthiness (src/ingest/post_images.py). Off flips posts to text-only
+# without touching the flow — the classifier is the newest code here, so it
+# gets a switch.
+POST_INDEX_IMAGES = _envbool("POST_INDEX_IMAGES", True)
+# Heuristic layer: hard drops, no model involved.
+POST_IMAGE_MIN_PX = _int("POST_IMAGE_MIN_PX", 200)        # icons, tracking pixels
+POST_IMAGE_MAX_ASPECT = _float("POST_IMAGE_MAX_ASPECT", 4.0)  # banners, dividers
+POST_IMAGE_MAX_MB = _int("POST_IMAGE_MAX_MB", 10)
+# CLIP layer: informative must BEAT decorative by a margin and clear a floor.
+# "Closer to chart than to photo" is a weaker claim than "is a chart", which is
+# why both conditions exist. The floor sits in the same ballpark as
+# CONFIDENCE_THRESHOLD — the same CLIP cosine scale.
+POST_IMAGE_MARGIN = _float("POST_IMAGE_MARGIN", 0.02)
+POST_IMAGE_MIN_SCORE = _float("POST_IMAGE_MIN_SCORE", 0.22)
+# An image before the first heading is nearly always cover art, so it faces a
+# HIGHER floor rather than a hard drop — a rare post leads with its key chart,
+# and vetoing position 0 would lose exactly the image most worth citing.
+POST_IMAGE_HERO_PENALTY = _float("POST_IMAGE_HERO_PENALTY", 0.03)
+# Alt text that names a figure ("chart", "diagram", "table") relaxes the floor.
+# A heuristic rather than a second embedding on purpose: scoring alt text in
+# CLIP space would mix text-text and text-image cosines, which live on
+# different scales — the calibration error RRF exists to avoid.
+POST_IMAGE_ALT_BONUS = _float("POST_IMAGE_ALT_BONUS", 0.03)
+
 # --- Presigned uploads (browser -> bucket, bypassing the API) -----------------
 PRESIGN_EXPIRY_S = _int("PRESIGN_EXPIRY_S", 900)          # presigned PUT lifetime
 PRESIGN_GET_EXPIRY_S = _int("PRESIGN_GET_EXPIRY_S", 3600)  # thumbnails / playback
