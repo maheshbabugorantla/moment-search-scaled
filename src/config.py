@@ -93,8 +93,17 @@ def gcs_service_account_info() -> dict:
 # Bucket key layout — every key is user-scoped (tenant isolation at the path level):
 #   uploads/{user_id}/{video_id}.{ext}      raw uploaded video (presigned PUT target)
 #   frames/{user_id}/{video_id}/NNNNNN.jpg  downscaled frame thumbnails (citations)
+#   papers/{user_id}/{sha256}.pdf           fetched PDFs, content-addressed —
+#                                           the same paper registered twice
+#                                           resolves to one object
 UPLOAD_KEY_PREFIX = "uploads/"
 FRAME_KEY_PREFIX = "frames/"
+PAPER_KEY_PREFIX = "papers/"
+
+# --- Paper ingest --------------------------------------------------------------
+# Cheap guard on the fetch stage: a "PDF" bigger than this fails the source with
+# a readable reason instead of filling the worker's disk.
+MAX_PAPER_MB = _int("MAX_PAPER_MB", 100)
 
 # --- Presigned uploads (browser -> bucket, bypassing the API) -----------------
 PRESIGN_EXPIRY_S = _int("PRESIGN_EXPIRY_S", 900)          # presigned PUT lifetime
