@@ -118,7 +118,8 @@ def upsert_pending(video: dict[str, Any]) -> dict:
                 storage_key = COALESCE(EXCLUDED.storage_key, ms_videos.storage_key),
                 source_hash = COALESCE(EXCLUDED.source_hash, ms_videos.source_hash),
                 title = COALESCE(EXCLUDED.title, ms_videos.title),
-                status = 'pending', error = NULL, progress = NULL, updated_at = now()
+                status = 'pending', error = NULL, progress = NULL, pct = 0,
+                stage = NULL, updated_at = now()
             RETURNING *
             """,
             video,
@@ -213,16 +214,26 @@ def set_stage(source_id: str, *, stage: str | None = None,
 
 
 def bump_attempts(video_id: str) -> int:
-    """Also resets stage/pct: a new run starts a fresh monotone pct window
-    (set_stage's GREATEST would otherwise pin a retry at the previous run's
-    high-water mark and progress would look frozen)."""
+    """Counts the attempt. Deliberately does NOT reset pct.
+
+    `pct` is monotone for the life of a registration, not per attempt. An
+    earlier version zeroed it here so a retry would climb from 0, but that
+    makes progress visibly run backwards the moment a run is retried —
+    exactly what REC-310 forbids, and what a poller watching a backfill
+    would read as a source regressing. GREATEST in set_stage() therefore
+    holds the high-water mark across attempts.
+
+    The cost is that a retry of a run that died at 95 reads 95 while it is
+    really re-fetching; `stage` and `status` still report the true position,
+    which is what an operator diagnosing "slow vs stuck" actually reads.
+    Re-registering a source is the one legitimate reset — upsert_pending() /
+    upsert_pending_document() zero pct there, because that genuinely starts
+    a new piece of work.
+    """
     with pool().connection() as conn:
         row = conn.execute(
-            """
-            UPDATE ms_videos SET attempts = attempts + 1, pct = 0, stage = NULL,
-                updated_at = now()
-            WHERE id = %s RETURNING attempts
-            """,
+            "UPDATE ms_videos SET attempts = attempts + 1, updated_at = now() "
+            "WHERE id = %s RETURNING attempts",
             (video_id,),
         ).fetchone()
     return row["attempts"] if row else 0
