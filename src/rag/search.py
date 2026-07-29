@@ -10,13 +10,15 @@ one free check kills most hallucination risk. Generated answers get their
 from __future__ import annotations
 
 import re
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .. import config, db, llm, storage
 from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
-                      FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_ANCHOR,
-                      TOP_K)
+                      FUSION_WINDOW_S, MAX_CITATIONS_PER_SOURCE,
+                      MAX_KIND_SHARE, RRF_K,
+                      TEXT_CONFIDENCE_THRESHOLD, TOP_ANCHOR, TOP_K)
 from . import vector_store
 from .embeddings import embed_query, embed_text
 
@@ -110,6 +112,75 @@ def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
             w["rrf"] *= CROSS_MODAL_BOOST
     windows.sort(key=lambda w: w["rrf"], reverse=True)
     return windows
+
+
+def _blend(windows: list[dict], k: int) -> list[dict]:
+    """Choose which k windows become citations, so one source or one kind
+    cannot occupy the whole answer (REC-316).
+
+    Retrieval scores say which windows are best; they say nothing about whether
+    an answer built from five sections of the SAME post is a good answer. And
+    the imbalance is structural rather than incidental — a 39-post corpus
+    contributes thousands of text chunks against 31 videos' transcripts, so
+    "the six best chunks" and "the six best sources" are different questions
+    and only the second one is what a reader wants.
+
+    Two passes. The first takes windows best-first while they stay under both
+    limits; the second fills any remaining slots from what the first deferred,
+    still best-first. That second pass is what makes these PREFERENCES rather
+    than quotas, and the distinction matters in both directions:
+
+      * when only videos are relevant, every deferred video comes straight
+        back and the answer is exactly what it would have been;
+      * when one post is genuinely the only deep source, it may still end up
+        with four of six citations — because four citations from the right
+        post beat two citations and four empty slots.
+
+    So the guarantee bought here is "a relevant source is never crowded out
+    entirely", not "no source exceeds N". The first is what a reader needs.
+
+    The chosen set is re-sorted by score before returning, so citations stay
+    ranked best-first. Diversity decides WHICH windows are cited, never in what
+    order — a reader reading [1] before [2] is entitled to assume [1] matched
+    better.
+    """
+    if k <= 0:
+        return []
+    per_source = MAX_CITATIONS_PER_SOURCE
+    # A share of k, not a count: the "at least two kinds" promise has to hold
+    # at whatever top_k the caller asked for.
+    #
+    # And only when a second kind is actually in the running. Applied to a
+    # single-kind candidate set it buys no diversity at all and actively harms
+    # the answer: it defers the 5th and 6th post, then fills those slots from
+    # the deferred pile — where the extra sections of the ALREADY over-cited
+    # post are, because they were deferred first. A limit that ends up
+    # re-concentrating the thing it exists to spread is worse than no limit.
+    per_kind = (int(k * MAX_KIND_SHARE)
+                if MAX_KIND_SHARE and len({w["kind"] for w in windows}) > 1
+                else 0)
+    if not per_source and not per_kind:
+        return windows[:k]
+
+    chosen: list[dict] = []
+    deferred: list[dict] = []
+    src_n: Counter[str] = Counter()
+    kind_n: Counter[str] = Counter()
+    for w in windows:                                    # already score-sorted
+        if len(chosen) >= k:
+            break
+        over_source = per_source and src_n[w["video_id"]] >= per_source
+        over_kind = per_kind and kind_n[w["kind"]] >= per_kind
+        if over_source or over_kind:
+            deferred.append(w)
+            continue
+        chosen.append(w)
+        src_n[w["video_id"]] += 1
+        kind_n[w["kind"]] += 1
+    if len(chosen) < k:
+        chosen.extend(deferred[:k - len(chosen)])
+    chosen.sort(key=lambda w: w["rrf"], reverse=True)
+    return chosen
 
 
 def _deeplink(video: dict | None, video_id: str, ms: int) -> str:
@@ -258,7 +329,7 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
                                          video_ids=video_ids)
         best_text = thits[0]["score"] if thits else 0.0
 
-    windows = _fuse(vhits, thits)[:k]
+    windows = _blend(_fuse(vhits, thits), k)
     videos = db.videos_by_ids(sorted({w["video_id"] for w in windows}))
     citations = []
     for i, w in enumerate(windows, 1):
