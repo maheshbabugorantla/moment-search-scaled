@@ -32,6 +32,7 @@ import socket
 import sys
 import urllib.error
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
 from .. import storage
@@ -123,21 +124,40 @@ def _page_count(path: Path) -> int:
 
 
 def parse_pdf(path: Path) -> list[str]:
-    """Stored bytes -> one text string per page (index 0 = page 1).
+    """Stored bytes -> one NORMALIZED text string per page (index 0 = page 1).
 
     The list length always equals the page count — image-only pages yield an
     empty string rather than being dropped, so downstream chunking can skip
     them WITHOUT losing the true page numbering (rag/chunk.py relies on this).
     A PDF that opens but yields no text anywhere is the caller's call to fail —
     that's a corpus decision (OCR or reject), not a parse error.
+
+    Pages go through textnorm.normalize_page before anything sees them:
+    pymupdf returns what the page LOOKS like, which includes ligature glyphs
+    and typesetter hyphenation that are not part of the words. Normalizing
+    here rather than at chunk time means chunk boundaries — and the point ids
+    derived from them — are computed from clean text.
     """
     import pymupdf
 
+    from .textnorm import normalize_page, typography_report
+
     try:
         with pymupdf.open(path) as doc:
-            return [page.get_text("text") for page in doc]
+            raw = [page.get_text("text") for page in doc]
     except Exception as exc:
         raise PaperSourceError(f"unreadable PDF: {exc}") from exc
+
+    # Log what typography this source carried. REC-338 was found by an ad-hoc
+    # script a month after the corpus was indexed; a one-line summary per
+    # ingest makes "how mangled is this PDF" answerable at the time.
+    found: Counter[str] = Counter()
+    for page_text in raw:
+        found.update(typography_report(page_text))
+    if found:
+        print(f"[parse] {path.name}: normalized " +
+              ", ".join(f"{v} {k}" for k, v in sorted(found.items()) if v))
+    return [normalize_page(page_text) for page_text in raw]
 
 
 def fetch_paper(uri: str, user_id: str, doc_id: str) -> dict:
