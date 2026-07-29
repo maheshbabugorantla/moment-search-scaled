@@ -36,19 +36,17 @@ from pathlib import Path
 
 from .. import storage
 from ..config import MAX_PAPER_MB, PAPER_KEY_PREFIX
+from .errors import SourceError, retry_unless_source_error  # noqa: F401
 from .fetch import scratch_dir, sha256_file
 
 _CHUNK = 1 << 20  # 1 MB read granularity — bounded memory whatever the PDF size
 _HTTP_TIMEOUT_S = 60
 
 
-class PaperSourceError(RuntimeError):
-    """The source itself is bad — not a PDF, too big, 4xx, no such host.
-
-    Deterministic failures: retrying cannot change the outcome, so the fetch
-    task's retry_condition_fn declines to retry these and the flow fails the
-    source with this message as the readable reason.
-    """
+# The classification moved to ingest/errors.py once the video flow needed it
+# too. The old name stays as an alias: it reads correctly at the paper call
+# sites, and nothing importing it has to change.
+PaperSourceError = SourceError
 
 
 def paper_key(user_id: str, content_hash: str) -> str:
@@ -163,17 +161,6 @@ def fetch_paper(uri: str, user_id: str, doc_id: str) -> dict:
         storage.upload_file(dest, key, content_type="application/pdf")
     return {"storage_key": key, "content_hash": content_hash,
             "byte_size": size, "page_count": pages, "scratch_path": str(dest)}
-
-
-def retry_unless_source_error(task, task_run, state) -> bool:
-    """Prefect retry_condition_fn: retry network blips, never a bad source."""
-    try:
-        state.result()
-    except PaperSourceError:
-        return False
-    except Exception:
-        return True
-    return False
 
 
 if __name__ == "__main__":  # python -m src.ingest.paper <uri> [user_id]
