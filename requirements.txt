@@ -26,6 +26,11 @@ fastembed>=0.3
 # bot-detection constantly and old yt-dlp versions stop working first.
 yt-dlp>=2026.7.4
 
+# Paper ingest — per-page PDF text extraction. NOTE: pymupdf is AGPL-licensed;
+# if that ever conflicts with distribution plans, pypdf (BSD) is the drop-in
+# fallback at the cost of weaker text extraction.
+pymupdf>=1.24
+
 # Bring-your-own multimodal LLM (optional providers; install what you use)
 openai>=1.30
 # anthropic>=0.25   # uncomment for LLM_PROVIDER=anthropic

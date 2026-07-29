@@ -18,6 +18,7 @@ import logging
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from .. import db
@@ -115,10 +116,10 @@ def list_sources(
 ):
     """One read over the whole manifest, whatever the source kind.
 
-    Reports; it does not measure. `pct` renders whatever the column holds, and
-    nothing writes it yet (REC-310 does) — so an `indexed` source currently
-    reports `pct: 0`. Treat `status` as the completion signal, not `pct`, until
-    that lands.
+    Reports; it does not measure. `pct` renders whatever the column holds —
+    the worker writes it per stage (REC-310), monotone within a run, 100
+    exactly when a source reaches `indexed`. `status` remains the terminal
+    signal; `pct` says how far a non-terminal run has come.
     """
     if kind is not None and kind not in SOURCE_KINDS:
         raise HTTPException(400, f"kind must be one of {', '.join(SOURCE_KINDS)}.")
@@ -134,3 +135,37 @@ def list_sources(
         # Explicit rather than making the poll loop compare arithmetic.
         "next_offset": offset + len(rows) if offset + len(rows) < total else None,
     }
+
+
+# ── Test fixture ──────────────────────────────────────────────────────────────
+
+_FIXTURE_PAGES = (
+    "MomentSearch fixture paper — page one. Retrieval augmented generation "
+    "combines a retriever with a generator so answers cite their sources.",
+    "Page two. Reciprocal rank fusion merges ranked lists from incomparable "
+    "scorers by rank alone, which is why the two branches can disagree on "
+    "score scales and still fuse.",
+    "Page three. Deterministic chunk identifiers let a redelivered ingest run "
+    "overwrite its previous points instead of duplicating them.",
+)
+
+
+@router.get("/fixtures/tiny.pdf")
+def fixture_pdf() -> Response:
+    """A tiny 3-page PDF, generated per request — the lifecycle contract test
+    registers THIS URL so a real end-to-end paper ingest needs no external
+    network (arXiv rate limits and MB-scale downloads made the suite flaky).
+
+    Unauthenticated on purpose: the worker's fetch sends no bearer token, and
+    the endpoint discloses nothing but lorem-adjacent fixture text.
+    """
+    import pymupdf
+
+    doc = pymupdf.open()
+    for text in _FIXTURE_PAGES:
+        page = doc.new_page()
+        page.insert_text((72, 72), text, fontsize=11)
+    doc.set_metadata({})  # keep the bytes as reproducible as pymupdf allows
+    body = doc.tobytes()
+    doc.close()
+    return Response(content=body, media_type="application/pdf")

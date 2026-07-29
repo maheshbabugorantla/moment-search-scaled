@@ -124,6 +124,15 @@ def _ensure(collection: str, dim: int) -> None:
                                field_schema=qm.PayloadSchemaType.KEYWORD)
     except Exception:
         pass
+    # kind: filtered by search_text's paper/deck exclusion (and by Epic 4's
+    # per-kind scoping later). Qdrant Cloud REJECTS filters on unindexed
+    # fields ("Index required but not found"), so the index must exist before
+    # the first filtered query, not after.
+    try:
+        c.create_payload_index(collection_name=collection, field_name="kind",
+                               field_schema=qm.PayloadSchemaType.KEYWORD)
+    except Exception:
+        pass
 
 
 def ensure_collection() -> None:
@@ -175,11 +184,15 @@ def search(vector: np.ndarray, user_id: str, *, top_k: int,
 # ── Transcript (text) branch ─────────────────────────────────────────────────
 
 def upsert_chunks(user_id: str, video_id: str, vectors: np.ndarray,
-                  payloads: list[dict[str, Any]]) -> None:
-    """Transcript chunks into the text collection. IDs are uuid5 of
-    '<video_id>:text:<i>' so re-runs overwrite, and never collide with frame ids."""
+                  payloads: list[dict[str, Any]], start_idx: int = 0) -> None:
+    """Text chunks into the text collection (transcripts AND paper chunks —
+    both are text, one collection). IDs are uuid5 of '<video_id>:text:<i>' so
+    re-runs overwrite, and never collide with frame ids. `start_idx` numbers a
+    BATCHED upsert: without it every batch would restart at :text:0 and
+    silently overwrite the previous batch's points."""
     points = [
-        qm.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{video_id}:text:{i}")),
+        qm.PointStruct(id=str(uuid.uuid5(uuid.NAMESPACE_URL,
+                                         f"{video_id}:text:{start_idx + i}")),
                        vector=vec.tolist(), payload=payload)
         for i, (vec, payload) in enumerate(zip(vectors, payloads))
     ]
@@ -190,12 +203,19 @@ def upsert_chunks(user_id: str, video_id: str, vectors: np.ndarray,
 def search_text(vector: np.ndarray, user_id: str, *, top_k: int,
                 video_id: str | None = None,
                 video_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    # The video Q&A path only. Document chunks (kind: paper/deck) share this
+    # collection but have no timestamp — fused as `t=0` "moments" they would
+    # cite a dead deeplink. They stay excluded until Epic 4 re-keys fusion on
+    # (kind, source, locator) and teaches citations to render a page/slide.
+    flt = _user_filter(user_id, video_id, video_ids)
+    flt.must_not = [qm.FieldCondition(key="kind",
+                                      match=qm.MatchAny(any=["paper", "deck"]))]
     try:
         hits = client().query_points(
             collection_name=TEXT_COLLECTION,
             query=vector.tolist(),
             limit=top_k,
-            query_filter=_user_filter(user_id, video_id, video_ids),
+            query_filter=flt,
             with_payload=True,
             search_params=qm.SearchParams(
                 quantization=qm.QuantizationSearchParams(rescore=True)

@@ -79,10 +79,13 @@ def test_deck_returns_202_with_a_storage_uri(registered) -> None:
 
 @pytest.mark.mutating
 def test_the_row_is_visible_as_pending(client: httpx.Client, registered) -> None:
-    doc_id = registered(PAPER_URI, "paper", "RAG Survey").json()["id"]
+    """A deck, deliberately: decks have no flow, so `pending` is stable. A
+    paper would be claimed by the dispatcher within one ~3s tick and could be
+    `queued`/`fetching` by the time this reads it back."""
+    doc_id = registered(DECK_URI, "deck", "KDD Keynote").json()["id"]
     row = client.get(f"/api/videos/{doc_id}").json()
     assert row["status"] == "pending"
-    assert row["title"] == "RAG Survey"
+    assert row["title"] == "KDD Keynote"
 
 
 @pytest.mark.mutating
@@ -166,14 +169,41 @@ def test_accept_does_not_block_on_work(
 
 
 @pytest.mark.mutating
-def test_a_document_is_not_claimed_by_the_video_dispatcher(
+def test_a_deck_is_not_claimed_by_the_dispatcher(
     client: httpx.Client, registered
 ) -> None:
-    """The hazard this PR closes. wfq_claim() used to select any pending row and
-    hand it to jobs.enqueue_video(), so a paper would have been pushed through
-    yt-dlp. It must sit `pending` until its own flow exists.
+    """The original guarantee, now scoped to kinds WITHOUT a flow. wfq_claim()
+    used to select any pending row and hand it to jobs.enqueue_video(), pushing
+    a document through yt-dlp. Papers have their own flow now (REC-309) and ARE
+    claimed; a deck still is not — it must sit `pending` until ingest_deck
+    exists, not be crashed through a pipeline that can't handle it.
     """
-    doc_id = registered(PAPER_URI, "paper").json()["id"]
+    doc_id = registered(DECK_URI, "deck").json()["id"]
     # The dispatcher polls on an interval; give it several rounds to misbehave.
     time.sleep(12)
     assert client.get(f"/api/videos/{doc_id}").json()["status"] == "pending"
+
+
+@pytest.mark.mutating
+def test_a_paper_with_a_dead_uri_is_dispatched_and_fails_readably(
+    client: httpx.Client, registered
+) -> None:
+    """The flip side of the deck test: a registered paper IS claimed now, and a
+    deterministic fetch failure (this URI 404s or serves HTML, never a PDF)
+    reaches `failed` fast — PaperSourceError skips the 30s+120s retry ladder —
+    with a one-line human-readable reason, not a traceback.
+    """
+    doc_id = registered(PAPER_URI, "paper").json()["id"]
+    deadline = time.monotonic() + 60
+    row = {}
+    while time.monotonic() < deadline:
+        row = client.get(f"/api/videos/{doc_id}").json()
+        if row.get("status") == "failed":
+            break
+        time.sleep(2)
+    assert row.get("status") == "failed", (
+        f"paper stuck in {row.get('status')!r} — was it never dispatched, "
+        "or did a dead URI burn the full retry ladder?")
+    assert row.get("error"), "failed with no reason recorded"
+    assert "Traceback" not in row["error"]
+    assert "\n" not in row["error"].strip()

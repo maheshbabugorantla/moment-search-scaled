@@ -93,8 +93,24 @@ def gcs_service_account_info() -> dict:
 # Bucket key layout — every key is user-scoped (tenant isolation at the path level):
 #   uploads/{user_id}/{video_id}.{ext}      raw uploaded video (presigned PUT target)
 #   frames/{user_id}/{video_id}/NNNNNN.jpg  downscaled frame thumbnails (citations)
+#   papers/{user_id}/{sha256}.pdf           fetched PDFs, content-addressed —
+#                                           the same paper registered twice
+#                                           resolves to one object
 UPLOAD_KEY_PREFIX = "uploads/"
 FRAME_KEY_PREFIX = "frames/"
+PAPER_KEY_PREFIX = "papers/"
+
+# --- Paper ingest --------------------------------------------------------------
+# Cheap guard on the fetch stage: a "PDF" bigger than this fails the source with
+# a readable reason instead of filling the worker's disk.
+MAX_PAPER_MB = _int("MAX_PAPER_MB", 100)
+# Page-aware chunking (rag/chunk.py) — characters per chunk and the overlap
+# carried across a forced split inside one long paragraph.
+PAPER_CHUNK_CHARS = _int("PAPER_CHUNK_CHARS", 1400)
+PAPER_CHUNK_OVERLAP = _int("PAPER_CHUNK_OVERLAP", 200)
+# Chunks per bge embed call in the paper flow (transcript chunks go in one call
+# because a talk has few; a 60-page paper does not).
+PAPER_EMBED_BATCH = _int("PAPER_EMBED_BATCH", 64)
 
 # --- Presigned uploads (browser -> bucket, bypassing the API) -----------------
 PRESIGN_EXPIRY_S = _int("PRESIGN_EXPIRY_S", 900)          # presigned PUT lifetime
@@ -116,21 +132,28 @@ VIDEO_STATUSES = ("pending", "queued", "fetching", "sampling", "embedding",
 # the migration lands before anything depends on it.
 SOURCE_KINDS = ("video", "paper", "deck")
 
-# The full lifecycle across kinds. Documents add one stage videos don't have:
-# `parsing` (PDF/PPTX -> page- or slide-aware chunks), which sits where
-# `sampling` sits for video.
-SOURCE_STATUSES = ("pending", "queued", "fetching", "parsing", "sampling",
-                   "embedding", "indexed", "skipped", "failed")
+# The full lifecycle across kinds. Documents add two stages videos don't have:
+# `parsing` (PDF -> per-page text) and `chunking` (pages -> page-aware chunks),
+# which together sit where `sampling` sits for video.
+SOURCE_STATUSES = ("pending", "queued", "fetching", "parsing", "chunking",
+                   "sampling", "embedding", "indexed", "skipped", "failed")
 
 # The vocabulary for the `stage` column — the last completed pipeline stage,
 # which Epic 5's checkpointing reads to skip finished work on a resumed run.
-SOURCE_STAGES = ("fetch", "parse", "sample", "embed", "transcript")
+SOURCE_STAGES = ("fetch", "parse", "chunk", "sample", "embed", "transcript")
 
 # In-flight = occupying execution capacity (scheduled or running). This feeds
-# DISPATCH_MAX_INFLIGHT accounting in the dispatcher, so `parsing` belongs here
-# from the start: a document sitting in `parsing` that didn't occupy a slot
-# would let the dispatcher over-admit.
-INFLIGHT_STATUSES = ("queued", "fetching", "parsing", "sampling", "embedding")
+# DISPATCH_MAX_INFLIGHT accounting in the dispatcher, so `parsing` and
+# `chunking` belong here from the start: a document in either state that didn't
+# occupy a slot would let the dispatcher over-admit.
+INFLIGHT_STATUSES = ("queued", "fetching", "parsing", "chunking", "sampling",
+                     "embedding")
+
+# Which kinds the dispatcher claims and routes to a flow. `deck` is absent on
+# purpose: it has no flow yet, so pending decks must SIT pending rather than be
+# claimed and crashed through a pipeline that can't handle them (the same
+# hazard wfq_claim's kind filter originally closed for papers).
+DISPATCH_KINDS = ("video", "paper")
 
 # --- Fair scheduling (WFQ) ----------------------------------------------------
 # FIFO (default off): register enqueues to Prefect immediately -> Prefect runs

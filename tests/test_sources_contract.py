@@ -11,14 +11,17 @@ import pytest
 
 from conftest import CORPUS_IDS
 
-PAPER_URI = "https://example.com/sources-test-paper.pdf"
+# A deck, deliberately: decks have no flow, so its `pending` status and pct: 0
+# are STABLE under assertion. A paper would be claimed by the dispatcher within
+# one ~3s tick (REC-309) and could read back `queued`/`fetching`.
+DECK_URI = "storage://decks/sources-test-deck.pdf"
 
 
 @pytest.fixture
-def a_pending_paper(client: httpx.Client, auth: dict):
+def a_pending_deck(client: httpx.Client, auth: dict):
     """A document in the manifest, removed afterwards."""
     r = client.post("/admin/documents",
-                    json={"uri": PAPER_URI, "kind": "paper", "title": "RAG Survey"},
+                    json={"uri": DECK_URI, "kind": "deck", "title": "KDD Keynote"},
                     headers=auth)
     assert r.status_code == 202
     doc_id = r.json()["id"]
@@ -66,7 +69,7 @@ def test_videos_appear_as_kind_video(client: httpx.Client, auth: dict) -> None:
 
 @pytest.mark.mutating
 def test_a_video_and_a_document_appear_side_by_side(
-    client: httpx.Client, auth: dict, a_pending_paper: str
+    client: httpx.Client, auth: dict, a_pending_deck: str
 ) -> None:
     """The point of the endpoint: one read, both kinds."""
     body = client.get("/admin/sources", headers=auth).json()
@@ -74,21 +77,21 @@ def test_a_video_and_a_document_appear_side_by_side(
 
     assert by_id[CORPUS_IDS[0]]["kind"] == "video"
 
-    doc = by_id[a_pending_paper]
-    assert doc["kind"] == "paper"
+    doc = by_id[a_pending_deck]
+    assert doc["kind"] == "deck"
     assert doc["status"] == "pending"
-    assert doc["title"] == "RAG Survey"
-    assert doc["uri"] == PAPER_URI
+    assert doc["title"] == "KDD Keynote"
+    assert doc["uri"] == DECK_URI
     assert doc["pct"] == 0
 
 
 # ── Filters ───────────────────────────────────────────────────────────────────
 
 @pytest.mark.mutating
-def test_filter_by_kind(client: httpx.Client, auth: dict, a_pending_paper: str) -> None:
-    body = client.get("/admin/sources", params={"kind": "paper"}, headers=auth).json()
-    assert {s["kind"] for s in body["sources"]} == {"paper"}
-    assert a_pending_paper in {s["id"] for s in body["sources"]}
+def test_filter_by_kind(client: httpx.Client, auth: dict, a_pending_deck: str) -> None:
+    body = client.get("/admin/sources", params={"kind": "deck"}, headers=auth).json()
+    assert {s["kind"] for s in body["sources"]} == {"deck"}
+    assert a_pending_deck in {s["id"] for s in body["sources"]}
 
 
 def test_filter_by_status(client: httpx.Client, auth: dict) -> None:

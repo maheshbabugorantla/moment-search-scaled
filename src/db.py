@@ -118,7 +118,8 @@ def upsert_pending(video: dict[str, Any]) -> dict:
                 storage_key = COALESCE(EXCLUDED.storage_key, ms_videos.storage_key),
                 source_hash = COALESCE(EXCLUDED.source_hash, ms_videos.source_hash),
                 title = COALESCE(EXCLUDED.title, ms_videos.title),
-                status = 'pending', error = NULL, progress = NULL, updated_at = now()
+                status = 'pending', error = NULL, progress = NULL, pct = 0,
+                stage = NULL, updated_at = now()
             RETURNING *
             """,
             video,
@@ -155,7 +156,8 @@ def upsert_pending_document(doc: dict[str, Any]) -> dict:
 def set_status(video_id: str, status: str, *, error: str | None = None,
                title: str | None = None, frame_count: int | None = None,
                source_hash: str | None = None, embed_version: str | None = None,
-               progress: float | None = None) -> None:
+               progress: float | None = None,
+               storage_key: str | None = None) -> None:
     with pool().connection() as conn:
         conn.execute(
             """
@@ -164,12 +166,13 @@ def set_status(video_id: str, status: str, *, error: str | None = None,
                 frame_count = COALESCE(%s, frame_count),
                 source_hash = COALESCE(%s, source_hash),
                 embed_version = COALESCE(%s, embed_version),
+                storage_key = COALESCE(%s, storage_key),
                 progress = %s,
                 updated_at = now()
             WHERE id = %s
             """,
             (status, error, title, frame_count, source_hash, embed_version,
-             progress, video_id),
+             storage_key, progress, video_id),
         )
 
 
@@ -179,10 +182,58 @@ def set_progress(video_id: str, progress: float) -> None:
                      (round(progress, 3), video_id))
 
 
+def set_stage(source_id: str, *, stage: str | None = None,
+              pct: int | None = None) -> None:
+    """Best-effort progress write: `stage` is the last COMPLETED pipeline stage
+    (SOURCE_STAGES vocabulary), `pct` the cross-kind 0-100 integer.
+
+    Two properties the flows lean on:
+    * GREATEST keeps pct monotone within a run — a retried task, or the
+      transcript stage running after embed already wrote 100, can never make
+      progress appear to move backwards. (bump_attempts resets pct at the
+      start of each NEW run, so a retry isn't pinned at the old high-water
+      mark.)
+    * Failures are logged and swallowed. Progress is telemetry; a dropped
+      Neon connection mid-embed must not fail an ingest that is otherwise
+      succeeding.
+    """
+    try:
+        with pool().connection() as conn:
+            conn.execute(
+                """
+                UPDATE ms_videos SET stage = COALESCE(%s, stage),
+                    pct = GREATEST(pct, COALESCE(%s, pct)),
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (stage, pct, source_id),
+            )
+    except Exception as exc:
+        print(f"[progress] {source_id}: set_stage failed "
+              f"({type(exc).__name__}: {exc}) — ignored")
+
+
 def bump_attempts(video_id: str) -> int:
+    """Counts the attempt. Deliberately does NOT reset pct.
+
+    `pct` is monotone for the life of a registration, not per attempt. An
+    earlier version zeroed it here so a retry would climb from 0, but that
+    makes progress visibly run backwards the moment a run is retried —
+    exactly what REC-310 forbids, and what a poller watching a backfill
+    would read as a source regressing. GREATEST in set_stage() therefore
+    holds the high-water mark across attempts.
+
+    The cost is that a retry of a run that died at 95 reads 95 while it is
+    really re-fetching; `stage` and `status` still report the true position,
+    which is what an operator diagnosing "slow vs stuck" actually reads.
+    Re-registering a source is the one legitimate reset — upsert_pending() /
+    upsert_pending_document() zero pct there, because that genuinely starts
+    a new piece of work.
+    """
     with pool().connection() as conn:
         row = conn.execute(
-            "UPDATE ms_videos SET attempts = attempts + 1, updated_at = now() WHERE id = %s RETURNING attempts",
+            "UPDATE ms_videos SET attempts = attempts + 1, updated_at = now() "
+            "WHERE id = %s RETURNING attempts",
             (video_id,),
         ).fetchone()
     return row["attempts"] if row else 0
@@ -283,36 +334,39 @@ def count_inflight() -> int:
     return row["n"] if row else 0
 
 
-def wfq_claim(limit: int) -> list[dict]:
-    """Atomically claim up to `limit` pending VIDEOS in FAIR (round-robin across
-    users) order, flipping them pending -> queued. Returns the claimed rows.
+def wfq_claim(limit: int, kinds: tuple[str, ...] | None = None) -> list[dict]:
+    """Atomically claim up to `limit` pending sources in FAIR (round-robin
+    across users) order, flipping them pending -> queued. Returns the claimed
+    rows with their `kind`, which the dispatcher routes to the matching flow.
 
-    Scoped to kind='video'. The dispatcher hands whatever it claims to
-    jobs.enqueue_video(), so without this filter a pending paper would be
-    claimed and pushed through yt-dlp — failing with an incomprehensible error
-    on a row nothing had any business fetching. Documents wait `pending` until
-    their own flow exists (REC-309).
+    Scoped to DISPATCH_KINDS — the kinds that HAVE a flow. A kind outside the
+    list (deck, today) must sit `pending` rather than be claimed and crashed
+    through a pipeline that can't handle it; that filter is the hazard the
+    original kind='video' scope closed when papers had no flow either.
 
-    Fairness: rank each user's pending videos by age (row_number partitioned by
-    user_id), then order by that rank first — so we take everyone's oldest, then
-    everyone's 2nd, ... A user who dumped 50 videos only gets one slot per round,
-    exactly like the others. The UPDATE ... WHERE status='pending' RETURNING is
-    the atomic claim: if two dispatchers race, each row is handed out once.
+    Fairness: rank each user's pending sources by age (row_number partitioned
+    by user_id), then order by that rank first — so we take everyone's oldest,
+    then everyone's 2nd, ... A user's papers and videos share their round-robin
+    slot: fairness is per tenant, not per kind. The UPDATE ...
+    WHERE status='pending' RETURNING is the atomic claim: if two dispatchers
+    race, each row is handed out once.
     """
+    from .config import DISPATCH_KINDS
     if limit <= 0:
         return []
+    kind_list = list(kinds if kinds is not None else DISPATCH_KINDS)
     with pool().connection() as conn:
         picked = conn.execute(
             """
             SELECT id FROM (
                 SELECT id, row_number() OVER (
                     PARTITION BY user_id ORDER BY created_at, id) AS rn
-                FROM ms_videos WHERE status = 'pending' AND kind = 'video'
+                FROM ms_videos WHERE status = 'pending' AND kind = ANY(%s)
             ) t
             ORDER BY rn, id
             LIMIT %s
             """,
-            (limit,),
+            (kind_list, limit),
         ).fetchall()
         ids = [r["id"] for r in picked]
         if not ids:
@@ -320,10 +374,10 @@ def wfq_claim(limit: int) -> list[dict]:
         return conn.execute(
             """
             UPDATE ms_videos SET status = 'queued', updated_at = now()
-            WHERE id = ANY(%s) AND status = 'pending' AND kind = 'video'
-            RETURNING id, user_id
+            WHERE id = ANY(%s) AND status = 'pending' AND kind = ANY(%s)
+            RETURNING id, user_id, kind
             """,
-            (ids,),
+            (ids, kind_list),
         ).fetchall()
 
 
