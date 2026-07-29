@@ -6,10 +6,12 @@ The fixture URI must be resolvable BY THE WORKER, which lives on the compose
 network — hence the http://api:8000 default rather than this suite's own
 CONTRACT_BASE_URL.
 
-What is deliberately NOT asserted here: that a query returns a post. Posts are
-excluded from search_text() until Epic 4 can render an anchor citation, so a
-search-based assertion would only pass by weakening the guard. The indexed
-units are checked directly instead.
+What is deliberately NOT asserted here: that a query returns THIS post. Epic 4
+removed the exclusion, so posts are retrievable — but whether a three-section
+fixture outranks a 39-post corpus is a property of the corpus, not of the
+lifecycle, and asserting it would make this file fail for the wrong reason.
+The indexed units are checked directly instead; cross-source retrieval has its
+own contract file.
 """
 from __future__ import annotations
 
@@ -216,8 +218,14 @@ def test_asking_a_question_still_works_with_a_post_indexed(
     A post's kept images live in the CLIP collection — they reuse the
     frame_key layout on purpose — but they carry an `anchor`, not an `ms`.
     search_text() excluded documents; search() did not, so a post image
-    ranking in the visual top-K reached the citation builder, which reads
+    ranking in the visual top-K reached the citation builder, which read
     fr["ms"] unconditionally and blew up the whole answer.
+
+    Epic 4 removed both exclusions, which is exactly why this assertion has to
+    get STRONGER rather than disappear with them: what kept the 500 out was
+    never the guard, it was deriving the locator per kind. Every citation must
+    now carry a locator shaped to its own kind — and none may carry an `ms` it
+    doesn't have.
 
     The question deliberately targets the fixture post's own subject matter,
     so its chunks and its chart are the most likely things to rank.
@@ -232,12 +240,18 @@ def test_asking_a_question_still_works_with_a_post_indexed(
         f"/api/ask returned {r.status_code} with a post indexed — "
         f"a document leaked into a branch that assumes video: {r.text[:300]}")
 
-    body = r.json()
-    for c in body.get("citations", []):
-        assert (c.get("kind") or "video") == "video", (
-            f"a {c.get('kind')} citation reached the video Q&A path; it has no "
-            "timestamp to seek to and its deeplink cannot be rendered yet")
-        assert c.get("ms") is not None, f"citation with no timestamp: {c}"
+    for c in r.json().get("citations", []):
+        kind, loc = c["kind"], c["locator"]
+        assert c["label"], f"a citation with no human locator: {c}"
+        if kind == "video":
+            assert isinstance(c["ms"], int) and loc["start_ms"] == c["ms"]
+        else:
+            assert c["ms"] is None, (
+                f"a {kind} citation reported ms={c['ms']} — it has no timeline, "
+                "and a plausible-looking 0 is a lie a reader would act on")
+        if kind == "post":
+            assert loc["anchor"], "a post citation with no anchor cannot be cited"
+            assert isinstance(loc["anchor_native"], bool)
 
 
 # ── The flowless-kind guarantee still holds ──────────────────────────────────

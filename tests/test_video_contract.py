@@ -112,6 +112,9 @@ _PUBLIC_FIELDS = {
     "id", "source", "url", "title", "status", "error", "frame_count",
     "progress", "attempts", "created_at", "updated_at", "is_sample",
 }
+# Added by Epic 4 — the manifest lists every kind now, so a client can no
+# longer assume "video" and read `source` to tell YouTube from upload.
+_EPIC4_VIDEO_FIELDS = {"kind"}
 
 
 def test_list_videos_exposes_the_public_field_set(client: httpx.Client) -> None:
@@ -120,7 +123,7 @@ def test_list_videos_exposes_the_public_field_set(client: httpx.Client) -> None:
     videos = r.json()["videos"]
     assert videos, "no videos in the manifest — is the corpus indexed?"
     for v in videos:
-        assert set(v) == _PUBLIC_FIELDS
+        assert set(v) == _PUBLIC_FIELDS | _EPIC4_VIDEO_FIELDS
 
 
 def test_corpus_talks_are_indexed(client: httpx.Client) -> None:
@@ -151,12 +154,28 @@ _CITATION_FIELDS = {
     "thumbnail", "media_url", "deeplink", "score", "transcript", "modalities",
 }
 
+# Added by Epic 4 (REC-314). Listed separately from the fields above so this
+# test still states, precisely, which keys the provided video UI depended on
+# before multi-source existed.
+_EPIC4_FIELDS = {"sourceId", "kind", "locator", "label"}
+
 
 @pytest.fixture(scope="module")
 def answer(client: httpx.Client) -> dict:
+    """Deliberately scoped to the video corpus.
+
+    Before Epic 4 this question could only be answered by a video, so an
+    unscoped ask WAS a video ask. Papers and posts about attention are now in
+    the index and legitimately outrank some talks — so the video contract is
+    pinned under the explicit `video_ids` scope the UI already sends, which is
+    the only way to keep asserting the original guarantee rather than a
+    weakened version of it. Cross-source behaviour is tested separately, in
+    tests/test_cross_source_contract.py.
+    """
     r = client.post(
         "/api/ask",
-        json={"question": "what is attention in transformers?", "top_k": 5},
+        json={"question": "what is attention in transformers?", "top_k": 5,
+              "video_ids": sorted(CORPUS_IDS)},
     )
     assert r.status_code == 200
     return r.json()
@@ -172,12 +191,24 @@ def test_every_citation_carries_the_ui_contract(answer: dict) -> None:
     """The UI reads ms/timestamp/deeplink/thumbnail off each citation to seek
     the player. Epic 4 adds `kind` and a locator; these fields must survive."""
     for c in answer["citations"]:
-        assert set(c) == _CITATION_FIELDS
+        assert set(c) == _CITATION_FIELDS | _EPIC4_FIELDS
+        assert c["kind"] == "video", "video_ids scope leaked another kind"
         assert isinstance(c["ms"], int) and c["ms"] >= 0
         assert TIMESTAMP_RE.match(c["timestamp"]), c["timestamp"]
         assert c["video_id"] in CORPUS_IDS
         assert isinstance(c["score"], (int, float))
         assert c["modalities"], "a citation with no modality is unexplainable"
+
+
+def test_a_video_citation_locator_agrees_with_its_flat_timestamp(answer: dict) -> None:
+    """`ms` and `locator.start_ms` are the same number reached two ways. They
+    are allowed to coexist (the UI reads the flat one) but never to disagree —
+    a divergence would mean the player seeks somewhere the citation doesn't
+    claim."""
+    for c in answer["citations"]:
+        assert c["locator"]["start_ms"] == c["ms"]
+        assert c["locator"]["end_ms"] > c["ms"]
+        assert c["sourceId"] == c["video_id"]
 
 
 def test_citation_deeplink_seeks_to_the_cited_moment(answer: dict) -> None:

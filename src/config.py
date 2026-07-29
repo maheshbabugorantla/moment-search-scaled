@@ -102,6 +102,11 @@ FRAME_KEY_PREFIX = "frames/"
 PAPER_KEY_PREFIX = "papers/"
 POST_KEY_PREFIX = "posts/"
 
+# The pseudo-anchor for content before a post's first heading. Shared
+# vocabulary rather than a parser detail: the read path has to recognise it to
+# know a citation cannot deeplink to a fragment (nothing renders `#_top`).
+TOP_ANCHOR = "_top"
+
 # --- Paper ingest --------------------------------------------------------------
 # Cheap guard on the fetch stage: a "PDF" bigger than this fails the source with
 # a readable reason instead of filling the worker's disk.
@@ -300,6 +305,24 @@ FUSION_WINDOW_S = _float("FUSION_WINDOW_S", 15.0)
 CROSS_MODAL_BOOST = _float("CROSS_MODAL_BOOST", 1.5)
 # Per-branch candidates fetched before fusion.
 BRANCH_TOP_K = _int("BRANCH_TOP_K", 20)
+
+# --- Cross-source blending (REC-316) -------------------------------------------
+# Chunk counts are wildly uneven across kinds: a 39-post corpus contributes
+# thousands of text chunks against 31 videos' transcripts, so a pure top-k comes
+# back all-post even when a talk says it better.
+#
+# These are PREFERENCES, not quotas. They decide the order candidates are taken
+# in; anything they defer is still used to fill slots nothing else can fill.
+# The guarantee they buy is "a relevant source is never crowded out entirely",
+# which is what a reader needs — not "no source exceeds N", which would mean
+# returning four citations when six were available.
+#
+# The kind limit is a SHARE of top_k rather than a count, so the promise holds
+# at any k: at the default k=6 one kind may take 4, at k=3 it may take 2. An
+# absolute count large enough to be sensible at k=6 never binds at k=3.
+# 0 disables either limit.
+MAX_CITATIONS_PER_SOURCE = _int("MAX_CITATIONS_PER_SOURCE", 2)
+MAX_KIND_SHARE = _float("MAX_KIND_SHARE", 0.67)
 
 # --- YouTube download hardening ---------------------------------------------------
 # YouTube increasingly answers yt-dlp's default web client with "Sign in to

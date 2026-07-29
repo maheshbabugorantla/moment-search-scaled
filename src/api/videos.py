@@ -151,7 +151,9 @@ def register(req: RegisterRequest, uid: str = Depends(user_id)):
 
 # ── Status / lifecycle ─────────────────────────────────────────────────────────
 
-_PUBLIC_FIELDS = ("id", "source", "url", "title", "status", "error",
+# `kind` joined the set with Epic 4: the list is no longer all videos, and the
+# UI has to label a post as a post rather than guess "upload" from `source`.
+_PUBLIC_FIELDS = ("id", "kind", "source", "url", "title", "status", "error",
                   "frame_count", "progress", "attempts", "created_at", "updated_at")
 
 
