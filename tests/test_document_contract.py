@@ -17,6 +17,7 @@ from conftest import CORPUS_IDS
 
 PAPER_URI = "https://example.com/contract-test-paper.pdf"
 DECK_URI = "storage://decks/contract-test-deck.pdf"
+POST_URI = "https://example.com/contract-test-post.md"
 # Deliberately unreachable — a 202 here is the assertion that matters.
 UNREACHABLE_URI = "https://example.invalid/probe_7.pdf"
 
@@ -75,6 +76,15 @@ def test_deck_returns_202_with_a_storage_uri(registered) -> None:
     r = registered(DECK_URI, "deck", "KDD Keynote")
     assert r.status_code == 202
     assert r.json()["kind"] == "deck"
+
+
+@pytest.mark.mutating
+def test_post_returns_202_with_a_markdown_uri(registered) -> None:
+    """The schema gate (REC-334): before migration 003 this died at the INSERT
+    and surfaced as a 502 — the wrong error for a supported kind."""
+    r = registered(POST_URI, "post", "Scaling laws, revisited")
+    assert r.status_code == 202
+    assert r.json()["kind"] == "post"
 
 
 @pytest.mark.mutating
@@ -180,6 +190,18 @@ def test_a_deck_is_not_claimed_by_the_dispatcher(
     """
     doc_id = registered(DECK_URI, "deck").json()["id"]
     # The dispatcher polls on an interval; give it several rounds to misbehave.
+    time.sleep(12)
+    assert client.get(f"/api/videos/{doc_id}").json()["status"] == "pending"
+
+
+@pytest.mark.mutating
+def test_a_post_is_not_claimed_by_the_dispatcher_yet(
+    client: httpx.Client, registered
+) -> None:
+    """REC-334 accepts the kind; it deliberately does NOT add it to
+    DISPATCH_KINDS. A claimed post with no flow is exactly the hazard the deck
+    test above pins. REC-336 replaces this test with the lifecycle walk."""
+    doc_id = registered(POST_URI, "post").json()["id"]
     time.sleep(12)
     assert client.get(f"/api/videos/{doc_id}").json()["status"] == "pending"
 

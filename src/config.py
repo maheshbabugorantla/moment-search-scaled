@@ -127,10 +127,11 @@ VIDEO_STATUSES = ("pending", "queued", "fetching", "sampling", "embedding",
                   "indexed", "skipped", "failed")
 
 # --- Source manifest (multi-kind) ---------------------------------------------
-# What a manifest row can describe. Videos are the only kind the pipeline writes
-# today; `paper` and `deck` are accepted by the schema ahead of their flows so
-# the migration lands before anything depends on it.
-SOURCE_KINDS = ("video", "paper", "deck")
+# What a manifest row can describe. `deck` is still accepted by the schema ahead
+# of its flow — the migration lands before anything depends on it. `post` is
+# markdown: same document lifecycle as a paper, but cited by heading anchor
+# instead of page number (migration 003).
+SOURCE_KINDS = ("video", "paper", "deck", "post")
 
 # The full lifecycle across kinds. Documents add two stages videos don't have:
 # `parsing` (PDF -> per-page text) and `chunking` (pages -> page-aware chunks),
