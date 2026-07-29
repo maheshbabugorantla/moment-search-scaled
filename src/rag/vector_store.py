@@ -124,6 +124,15 @@ def _ensure(collection: str, dim: int) -> None:
                                field_schema=qm.PayloadSchemaType.KEYWORD)
     except Exception:
         pass
+    # kind: filtered by search_text's paper/deck exclusion (and by Epic 4's
+    # per-kind scoping later). Qdrant Cloud REJECTS filters on unindexed
+    # fields ("Index required but not found"), so the index must exist before
+    # the first filtered query, not after.
+    try:
+        c.create_payload_index(collection_name=collection, field_name="kind",
+                               field_schema=qm.PayloadSchemaType.KEYWORD)
+    except Exception:
+        pass
 
 
 def ensure_collection() -> None:
