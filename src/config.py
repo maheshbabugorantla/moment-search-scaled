@@ -393,8 +393,31 @@ KNN_K = _int("KNN_K", 24)                # candidates fetched before trimming to
 # below their threshold. Fusion scores are RRF (tiny), so the gate uses each
 # branch's own raw cosine. CLIP text->image cosines run low (~0.2-0.35); bge
 # text-text cosines run higher (~0.5-0.7 for real matches). 0 disables.
-CONFIDENCE_THRESHOLD = _float("CONFIDENCE_THRESHOLD", 0.2)              # visual (CLIP)
-TEXT_CONFIDENCE_THRESHOLD = _float("TEXT_CONFIDENCE_THRESHOLD", 0.35)  # transcript (bge)
+# Gate 1 — abstain before the LLM call when NEITHER branch looks relevant.
+#
+# Both defaults are measured, not guessed, on a 79-source corpus with 10
+# gibberish queries, 4 off-topic-but-real-English ones and 12 genuine ones:
+#
+#   branch / provider          gibberish      off-topic      genuine
+#   CLIP (visual)              0.241-0.267    0.242-0.257    0.268-0.345
+#   bge (fastembed)            0.605-0.730    0.591-0.705    0.699-0.829
+#   text-embedding-3-small     0.278-0.362    0.167-0.294    0.413-0.710
+#
+# The text threshold is provider-dependent because the SCALES are. bge packs
+# everything into 0.59-0.83 and its genuine/gibberish ranges OVERLAP, so no
+# constant separates them — its value is documented as inert (REC-340), kept
+# only so a fastembed deployment behaves exactly as it did. OpenAI's spread is
+# wide enough for a real gate: 0.39 sits between 0.362 and 0.413.
+#
+# The CLIP threshold rises to 0.30 — below every genuine query in the sample
+# (min 0.268 overall, and 0.308-0.348 for the four visual example queries the
+# sample page ships) and above every gibberish one (max 0.267). Note this is a
+# 0.001-wide separation on its own and would be overfitting as a sole gate;
+# it is safe here only because the gate is an OR and the text branch is the
+# one doing the discriminating.
+CONFIDENCE_THRESHOLD = _float("CONFIDENCE_THRESHOLD", 0.30)   # visual (CLIP)
+TEXT_CONFIDENCE_THRESHOLD = _float(
+    "TEXT_CONFIDENCE_THRESHOLD", 0.39 if _TE_OPENAI else 0.35)
 
 # --- Multimodal LLM (answer synthesis only — retrieval works without it) -----------
 # LLM_PROVIDER: openai | nvidia | anthropic ("openai" also covers any
