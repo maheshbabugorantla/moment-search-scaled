@@ -59,6 +59,7 @@ def t_fetch_paper(doc_id: str, user_id: str) -> dict:
         Path(handle["scratch_path"]).unlink(missing_ok=True)
         db.set_status(doc_id, "skipped", error=f"duplicate of {dup['id']}")
         return {}
+    db.set_stage(doc_id, stage="fetch", pct=20)
     return handle
 
 
@@ -72,6 +73,7 @@ def t_parse(doc_id: str, path: str) -> list[str]:
         raise RuntimeError(
             f"no extractable text on any of the {len(pages)} pages — "
             "a scanned PDF needs OCR, which this pipeline does not do")
+    db.set_stage(doc_id, stage="parse", pct=35)
     return pages
 
 
@@ -83,6 +85,7 @@ def t_chunk(doc_id: str, pages: list[str]) -> list[dict]:
     if not chunks:
         raise RuntimeError("chunking produced nothing despite extractable text")
     print(f"[chunk] {doc_id}: {len(pages)} pages -> {len(chunks)} chunks")
+    db.set_stage(doc_id, stage="chunk", pct=45)
     return [{"page": c.page, "text": c.text} for c in chunks]
 
 
@@ -112,9 +115,14 @@ def t_embed_upsert(doc_id: str, user_id: str, chunks: list[dict]) -> int:
         )
         total += len(batch)
         db.set_progress(doc_id, total / len(chunks))
+        # 45 -> 95 across the embed batches (the wall-clock-dominant stage,
+        # updated per batch, never per chunk); the last 5 points arrive with
+        # `indexed` so pct hits 100 exactly when the status does.
+        db.set_stage(doc_id, pct=45 + int(50 * total / len(chunks)))
     # frame_count doubles as "how many units were indexed" — chunks, for a paper.
     db.set_status(doc_id, "indexed", frame_count=total,
                   embed_version=TEXT_EMBED_VERSION, progress=1.0)
+    db.set_stage(doc_id, stage="embed", pct=100)
     return total
 
 

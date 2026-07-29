@@ -116,10 +116,10 @@ def list_sources(
 ):
     """One read over the whole manifest, whatever the source kind.
 
-    Reports; it does not measure. `pct` renders whatever the column holds, and
-    nothing writes it yet (REC-310 does) — so an `indexed` source currently
-    reports `pct: 0`. Treat `status` as the completion signal, not `pct`, until
-    that lands.
+    Reports; it does not measure. `pct` renders whatever the column holds —
+    the worker writes it per stage (REC-310), monotone within a run, 100
+    exactly when a source reaches `indexed`. `status` remains the terminal
+    signal; `pct` says how far a non-terminal run has come.
     """
     if kind is not None and kind not in SOURCE_KINDS:
         raise HTTPException(400, f"kind must be one of {', '.join(SOURCE_KINDS)}.")

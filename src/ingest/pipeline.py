@@ -61,6 +61,7 @@ def t_fetch(video_id: str, user_id: str) -> str:
         path.unlink(missing_ok=True)
         db.set_status(video_id, "skipped", error=f"duplicate of {dup['id']}")
         return ""
+    db.set_stage(video_id, stage="fetch", pct=20)
     return str(path)
 
 
@@ -83,12 +84,14 @@ def t_sample(video_id: str, user_id: str, path: str) -> list[Frame]:
         i, f = i_f
         storage.put_bytes(storage.frame_key(user_id, video_id, i), f.jpeg, "image/jpeg")
         done += 1
-        if done % 25 == 0:
+        if done % 25 == 0:  # throttled — one write per 25 PUTs, never per frame
             db.set_progress(video_id, done / len(kept))
+            db.set_stage(video_id, pct=20 + int(40 * done / len(kept)))
 
     with ThreadPoolExecutor(max_workers=_UPLOAD_POOL) as ex:
         list(ex.map(_put, enumerate(kept)))
     db.set_progress(video_id, 1.0)
+    db.set_stage(video_id, stage="sample", pct=60)
     return kept
 
 
@@ -115,8 +118,12 @@ def t_embed_index(video_id: str, user_id: str, frames: list[Frame]) -> int:
         )
         total += len(batch)
         db.set_progress(video_id, total / len(frames))
+        # 60 -> 95 across the embed batches; the last 5 points arrive with
+        # `indexed` so pct hits 100 exactly when the status does.
+        db.set_stage(video_id, pct=60 + int(35 * total / len(frames)))
     db.set_status(video_id, "indexed", frame_count=total,
                   embed_version=EMBED_VERSION, progress=1.0)
+    db.set_stage(video_id, stage="embed", pct=100)
     return total
 
 
@@ -148,6 +155,8 @@ def t_transcript(video_id: str, user_id: str) -> int:
              "ms": int(c["t_start"] * 1000), "text": c["text"],
              "embed_version": TEXT_EMBED_VERSION} for c in chunks])
         print(f"[transcript] {video_id}: indexed {len(chunks)} transcript chunks")
+        # pct is already 100 (GREATEST keeps it there); only the stage advances.
+        db.set_stage(video_id, stage="transcript")
         return len(chunks)
     except Exception as exc:
         print(f"[transcript] {video_id}: failed ({type(exc).__name__}: {exc}) — visual-only")

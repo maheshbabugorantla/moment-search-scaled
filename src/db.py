@@ -181,10 +181,48 @@ def set_progress(video_id: str, progress: float) -> None:
                      (round(progress, 3), video_id))
 
 
+def set_stage(source_id: str, *, stage: str | None = None,
+              pct: int | None = None) -> None:
+    """Best-effort progress write: `stage` is the last COMPLETED pipeline stage
+    (SOURCE_STAGES vocabulary), `pct` the cross-kind 0-100 integer.
+
+    Two properties the flows lean on:
+    * GREATEST keeps pct monotone within a run — a retried task, or the
+      transcript stage running after embed already wrote 100, can never make
+      progress appear to move backwards. (bump_attempts resets pct at the
+      start of each NEW run, so a retry isn't pinned at the old high-water
+      mark.)
+    * Failures are logged and swallowed. Progress is telemetry; a dropped
+      Neon connection mid-embed must not fail an ingest that is otherwise
+      succeeding.
+    """
+    try:
+        with pool().connection() as conn:
+            conn.execute(
+                """
+                UPDATE ms_videos SET stage = COALESCE(%s, stage),
+                    pct = GREATEST(pct, COALESCE(%s, pct)),
+                    updated_at = now()
+                WHERE id = %s
+                """,
+                (stage, pct, source_id),
+            )
+    except Exception as exc:
+        print(f"[progress] {source_id}: set_stage failed "
+              f"({type(exc).__name__}: {exc}) — ignored")
+
+
 def bump_attempts(video_id: str) -> int:
+    """Also resets stage/pct: a new run starts a fresh monotone pct window
+    (set_stage's GREATEST would otherwise pin a retry at the previous run's
+    high-water mark and progress would look frozen)."""
     with pool().connection() as conn:
         row = conn.execute(
-            "UPDATE ms_videos SET attempts = attempts + 1, updated_at = now() WHERE id = %s RETURNING attempts",
+            """
+            UPDATE ms_videos SET attempts = attempts + 1, pct = 0, stage = NULL,
+                updated_at = now()
+            WHERE id = %s RETURNING attempts
+            """,
             (video_id,),
         ).fetchone()
     return row["attempts"] if row else 0

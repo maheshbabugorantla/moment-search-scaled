@@ -1,0 +1,11 @@
+-- 002 — pct backfill (REC-310).
+--
+-- The worker starts writing stage/pct with this release, but every source
+-- indexed BEFORE it would keep reporting pct: 0 forever — an `indexed` corpus
+-- video reading "0%" is visibly wrong in /admin/sources. Terminal success
+-- means 100 by definition, so backfill it.
+--
+-- Re-runnable by construction: init_schema() executes every migrations/*.up.sql
+-- on every boot of app, worker and seeding, and the WHERE clause makes any
+-- second application a no-op.
+UPDATE ms_videos SET pct = 100 WHERE status = 'indexed' AND pct < 100;
