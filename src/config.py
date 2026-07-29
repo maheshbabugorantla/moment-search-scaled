@@ -109,8 +109,28 @@ ALLOWED_UPLOAD_TYPES = ("video/",)                         # content-type must s
 # embedding = CLIP + Qdrant upsert; skipped = duplicate (user_id, source_hash).
 VIDEO_STATUSES = ("pending", "queued", "fetching", "sampling", "embedding",
                   "indexed", "skipped", "failed")
-# In-flight = occupying execution capacity (scheduled or running).
-INFLIGHT_STATUSES = ("queued", "fetching", "sampling", "embedding")
+
+# --- Source manifest (multi-kind) ---------------------------------------------
+# What a manifest row can describe. Videos are the only kind the pipeline writes
+# today; `paper` and `deck` are accepted by the schema ahead of their flows so
+# the migration lands before anything depends on it.
+SOURCE_KINDS = ("video", "paper", "deck")
+
+# The full lifecycle across kinds. Documents add one stage videos don't have:
+# `parsing` (PDF/PPTX -> page- or slide-aware chunks), which sits where
+# `sampling` sits for video.
+SOURCE_STATUSES = ("pending", "queued", "fetching", "parsing", "sampling",
+                   "embedding", "indexed", "skipped", "failed")
+
+# The vocabulary for the `stage` column — the last completed pipeline stage,
+# which Epic 5's checkpointing reads to skip finished work on a resumed run.
+SOURCE_STAGES = ("fetch", "parse", "sample", "embed", "transcript")
+
+# In-flight = occupying execution capacity (scheduled or running). This feeds
+# DISPATCH_MAX_INFLIGHT accounting in the dispatcher, so `parsing` belongs here
+# from the start: a document sitting in `parsing` that didn't occupy a slot
+# would let the dispatcher over-admit.
+INFLIGHT_STATUSES = ("queued", "fetching", "parsing", "sampling", "embedding")
 
 # --- Fair scheduling (WFQ) ----------------------------------------------------
 # FIFO (default off): register enqueues to Prefect immediately -> Prefect runs

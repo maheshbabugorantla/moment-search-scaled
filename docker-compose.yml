@@ -89,6 +89,9 @@ services:
     env_file: .env
     environment:
       CONTRACT_BASE_URL: http://api:8000
+      # Most tests are black-box HTTP, but the 502 path is exercised in-process
+      # with the manifest write forced to fail — that needs to import src.
+      PYTHONPATH: /app
     volumes:
       - ./tests:/app/tests:ro
       - ./pytest.ini:/app/pytest.ini:ro

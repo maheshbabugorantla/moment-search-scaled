@@ -1,12 +1,29 @@
-"""Postgres (Neon) access layer — the videos manifest, source of truth.
+"""Postgres (Neon) access layer — the source manifest, source of truth.
 
-One row per (user's) video; `status` tracks the ingest lifecycle:
-pending -> fetching -> sampling -> embedding -> indexed | skipped | failed
+One row per (user's) source; `status` tracks the ingest lifecycle:
+pending -> queued -> fetching -> sampling -> embedding -> indexed | skipped | failed
 (skipped = duplicate (user_id, source_hash); indexed = searchable in Qdrant).
+
+The table is still named `ms_videos` — renaming it would break nothing but buys
+nothing either, and a rename is the one migration that cannot be rolled back
+without downtime. `kind` (video | paper | deck) is what distinguishes rows now.
+
+Two column pairs look redundant and are not. Both were left split deliberately:
+
+* `uri` vs `url` — `uri` is the unified source location for every kind. For a
+  video it is *derived* from `url`/`storage_key`; `url` remains the column the
+  deeplink builder (rag/search.py) and the transcript fetcher (ingest/pipeline.py)
+  read. Collapsing them would change the video contract, which is a rubric red
+  line, for no gain.
+* `pct` vs `progress` — `pct` is integer 0-100 across all kinds; `progress` is
+  the REAL 0..1 within-stage value the video flow already writes and the UI
+  already renders. The worker starts writing `pct` in REC-310; until then
+  `progress` stays authoritative for video.
 """
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -70,9 +87,22 @@ CREATE TABLE IF NOT EXISTS ms_user_llms (
 """
 
 
+# Migrations live as .sql next to the app rather than in a framework — there
+# are few of them and they must run on a plain `compose up`. Each is written to
+# be re-runnable, because init_schema() is called by app.py, worker.py and
+# seeding.py on every boot.
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+
+
+def _migrations() -> list[Path]:
+    return sorted(MIGRATIONS_DIR.glob("*.up.sql"))
+
+
 def init_schema() -> None:
     with pool().connection() as conn:
         conn.execute(SCHEMA)
+        for path in _migrations():
+            conn.execute(path.read_text())
 
 
 def upsert_pending(video: dict[str, Any]) -> dict:
@@ -92,6 +122,32 @@ def upsert_pending(video: dict[str, Any]) -> dict:
             RETURNING *
             """,
             video,
+        ).fetchone()
+    return row
+
+
+def upsert_pending_document(doc: dict[str, Any]) -> dict:
+    """Insert a paper/deck as pending; re-submitting the same URI resets it.
+
+    Deliberately separate from upsert_pending() rather than a widened version of
+    it: the video INSERT is under a contract test and there is no reason to put
+    documents' columns through it. `source` is set to the kind so the existing
+    NOT NULL holds without inventing a fake 'youtube'/'upload' value.
+    """
+    with pool().connection() as conn:
+        row = conn.execute(
+            """
+            INSERT INTO ms_videos (id, user_id, source, kind, uri, title, status)
+            VALUES (%(id)s, %(user_id)s, %(kind)s, %(kind)s, %(uri)s, %(title)s, 'pending')
+            ON CONFLICT (id) DO UPDATE SET
+                uri = COALESCE(EXCLUDED.uri, ms_videos.uri),
+                kind = EXCLUDED.kind,
+                title = COALESCE(EXCLUDED.title, ms_videos.title),
+                status = 'pending', error = NULL, progress = NULL, pct = 0,
+                stage = NULL, updated_at = now()
+            RETURNING *
+            """,
+            doc,
         ).fetchone()
     return row
 
@@ -161,6 +217,46 @@ def list_videos(user_id: str, status: str | None = None) -> list[dict]:
         return conn.execute(q, tuple(params)).fetchall()
 
 
+def list_sources(user_id: str, *, kind: str | None = None,
+                 status: str | None = None, limit: int = 100,
+                 offset: int = 0) -> list[dict]:
+    """Every source for a tenant, whatever its kind — the read behind
+    GET /admin/sources.
+
+    Ordering breaks ties on `id`. list_videos() orders on created_at alone,
+    which is unstable when rows share a timestamp — and they do, because a
+    backfill inserts many rows within the same clock tick. The resilience
+    harness pages through this in a poll loop, so an unstable sort would let a
+    row appear on two pages or none.
+    """
+    q = "SELECT * FROM ms_videos WHERE user_id = %s"
+    params: list = [user_id]
+    if kind:
+        q += " AND kind = %s"
+        params.append(kind)
+    if status:
+        q += " AND status = %s"
+        params.append(status)
+    q += " ORDER BY created_at DESC, id LIMIT %s OFFSET %s"
+    params += [limit, offset]
+    with pool().connection() as conn:
+        return conn.execute(q, tuple(params)).fetchall()
+
+
+def count_sources(user_id: str, *, kind: str | None = None,
+                  status: str | None = None) -> int:
+    q = "SELECT count(*) AS n FROM ms_videos WHERE user_id = %s"
+    params: list = [user_id]
+    if kind:
+        q += " AND kind = %s"
+        params.append(kind)
+    if status:
+        q += " AND status = %s"
+        params.append(status)
+    with pool().connection() as conn:
+        return conn.execute(q, tuple(params)).fetchone()["n"]
+
+
 def videos_by_ids(ids: list[str]) -> dict[str, dict]:
     """Metadata join for search citations (title/url/source live here, not in Qdrant)."""
     if not ids:
@@ -188,8 +284,14 @@ def count_inflight() -> int:
 
 
 def wfq_claim(limit: int) -> list[dict]:
-    """Atomically claim up to `limit` pending videos in FAIR (round-robin across
+    """Atomically claim up to `limit` pending VIDEOS in FAIR (round-robin across
     users) order, flipping them pending -> queued. Returns the claimed rows.
+
+    Scoped to kind='video'. The dispatcher hands whatever it claims to
+    jobs.enqueue_video(), so without this filter a pending paper would be
+    claimed and pushed through yt-dlp — failing with an incomprehensible error
+    on a row nothing had any business fetching. Documents wait `pending` until
+    their own flow exists (REC-309).
 
     Fairness: rank each user's pending videos by age (row_number partitioned by
     user_id), then order by that rank first — so we take everyone's oldest, then
@@ -205,7 +307,7 @@ def wfq_claim(limit: int) -> list[dict]:
             SELECT id FROM (
                 SELECT id, row_number() OVER (
                     PARTITION BY user_id ORDER BY created_at, id) AS rn
-                FROM ms_videos WHERE status = 'pending'
+                FROM ms_videos WHERE status = 'pending' AND kind = 'video'
             ) t
             ORDER BY rn, id
             LIMIT %s
@@ -218,7 +320,7 @@ def wfq_claim(limit: int) -> list[dict]:
         return conn.execute(
             """
             UPDATE ms_videos SET status = 'queued', updated_at = now()
-            WHERE id = ANY(%s) AND status = 'pending'
+            WHERE id = ANY(%s) AND status = 'pending' AND kind = 'video'
             RETURNING id, user_id
             """,
             (ids,),
