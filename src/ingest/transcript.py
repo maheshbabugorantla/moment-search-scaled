@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .. import config
 from .fetch import _yt_opts, scratch_dir
+from .textnorm import normalize_speech
 
 
 def _sub_opts(video_id: str) -> dict:
@@ -94,8 +95,15 @@ def chunk_cues(cues: list[dict], chunk_seconds: float | None = None) -> list[dic
         buf.append(c["text"])
         last_end = c["t_end"]
         if last_end - start >= span:
-            chunks.append({"text": " ".join(buf), "t_start": start, "t_end": last_end})
+            chunks.append({"text": normalize_speech(" ".join(buf)),
+                           "t_start": start, "t_end": last_end})
             buf, start = [], None
     if buf and start is not None:
-        chunks.append({"text": " ".join(buf), "t_start": start, "t_end": last_end})
-    return chunks
+        chunks.append({"text": normalize_speech(" ".join(buf)),
+                       "t_start": start, "t_end": last_end})
+    # Normalizing here rather than at the call sites: this is the one place a
+    # transcript becomes a chunk, and both callers (the video flow and the
+    # re-index) need identical text or their point ids stop overwriting.
+    # A chunk that was nothing but filler is dropped — it would embed to noise
+    # and could still be cited, quoting a reader "um, uh".
+    return [c for c in chunks if c["text"].strip()]
