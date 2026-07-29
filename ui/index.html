@@ -104,11 +104,12 @@
   <!-- RESULTS -->
   <section id="resultsWrap" class="hidden mt-10">
     <article id="article" class="max-w-3xl"></article>
-    <div class="flex items-center justify-between mt-10 mb-4">
-      <h3 class="display text-2xl font-600">Moments</h3>
-      <span class="text-muted text-sm">Click any moment to play it here.</span>
+    <div id="momentsHead" class="flex items-center justify-between mt-10 mb-4">
+      <h3 class="display text-2xl font-600">Sources</h3>
+      <span class="text-muted text-sm">Click any source to open it here.</span>
     </div>
     <div id="sources" class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+    <p id="noSources" class="hidden text-muted text-sm mt-2"></p>
   </section>
 </main>
 
@@ -386,6 +387,24 @@ const KIND_STYLE = {
 const kindOf = c => KIND_STYLE[c.kind] || KIND_STYLE.video;
 
 function renderSources(){
+  /* An abstention returns zero citations by design — the answer grounded
+     itself in nothing, so there is nothing to cite. Rendering an empty grid
+     under a "click any source" hint reads as a broken page, which is exactly
+     how it was reported. Say what happened, and on the front page say WHY:
+     that view only ever searches the four sample talks, so a question about
+     a paper or a post cannot be answered there however well it is indexed. */
+  const empty = !CITES.length;
+  $("#momentsHead").classList.toggle("hidden", empty);
+  const note = $("#noSources");
+  note.classList.toggle("hidden", !empty);
+  if(empty){
+    note.textContent = SELECTABLE()
+      ? "No sources matched — nothing indexed was close enough to cite."
+      : "No sources matched. This page searches only the four sample talks — "
+        + "use “Get started” to search everything you've indexed.";
+    $("#sources").innerHTML = "";
+    return;
+  }
   $("#sources").innerHTML=CITES.map(c=>{
     const k = kindOf(c);
     const mods=(c.modalities||[]);
