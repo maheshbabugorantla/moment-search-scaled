@@ -145,7 +145,13 @@ def t_images_post(doc_id: str, user_id: str, sections: list[dict],
     download is still a correctly indexed post, and this stage carries no
     retries. That is the transcript branch's contract, for the same reason.
     """
-    refs = [(s["anchor"], img) for s in sections for img in s.get("images", ())]
+    # The section's heading and anchor_native ride along with each ref. An
+    # image-only window reads its locator from the FRAME payload — there is no
+    # text hit to read — so without these the citation degrades to a bare
+    # "post" linking to the article root instead of "§ The capex question"
+    # linking to the section. Measured on the live corpus, not hypothesised.
+    refs = [(s["anchor"], s.get("heading", ""), bool(s.get("anchor_native")), img)
+            for s in sections for img in s.get("images", ())]
     if not POST_INDEX_IMAGES or not refs:
         return 0
     try:
@@ -156,8 +162,8 @@ def t_images_post(doc_id: str, user_id: str, sections: list[dict],
         from . import post_images
 
         prompts = post_images.prompt_bank()
-        kept: list[tuple[int, str, bytes, post_images.Verdict]] = []
-        for idx, (anchor, img) in enumerate(refs):
+        kept: list[tuple[int, tuple[str, str, bool], bytes, post_images.Verdict]] = []
+        for idx, (anchor, heading, native, img) in enumerate(refs):
             url = post_images.resolve(img["url"], base_uri)
             verdict = post_images.judge(url, alt=img.get("alt", ""),
                                         hero=bool(img.get("hero")),
@@ -166,12 +172,12 @@ def t_images_post(doc_id: str, user_id: str, sections: list[dict],
             print(f"[images] {doc_id} #{anchor} {mark}: {verdict.reason} "
                   f"— {url[:80]}")
             if verdict.keep:
-                kept.append((idx, anchor, verdict.jpeg, verdict))
+                kept.append((idx, (anchor, heading, native), verdict.jpeg, verdict))
         if not kept:
             return 0
 
         storage.delete_prefix(storage.frame_prefix(user_id, doc_id))
-        for idx, anchor, jpeg, _ in kept:
+        for idx, _loc, jpeg, _ in kept:
             storage.put_bytes(storage.frame_key(user_id, doc_id, idx), jpeg,
                               "image/jpeg")
         vector_store.ensure_collection()
@@ -183,10 +189,11 @@ def t_images_post(doc_id: str, user_id: str, sections: list[dict],
             ids=[idx for idx, _, _, _ in kept],
             vectors=vectors,
             payloads=[{"user_id": user_id, "video_id": doc_id, "kind": "post",
-                       "modality": "frame", "anchor": anchor, "idx": idx,
+                       "modality": "frame", "anchor": loc[0],
+                       "heading": loc[1], "anchor_native": loc[2], "idx": idx,
                        "img_class": v.img_class, "img_score": v.img_score,
                        "embed_version": EMBED_VERSION}
-                      for idx, anchor, _, v in kept],
+                      for idx, loc, _, v in kept],
         )
         print(f"[images] {doc_id}: {len(kept)}/{len(refs)} image(s) indexed")
         return len(kept)
