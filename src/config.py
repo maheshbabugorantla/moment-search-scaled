@@ -96,9 +96,11 @@ def gcs_service_account_info() -> dict:
 #   papers/{user_id}/{sha256}.pdf           fetched PDFs, content-addressed —
 #                                           the same paper registered twice
 #                                           resolves to one object
+#   posts/{user_id}/{sha256}.md             fetched markdown, content-addressed
 UPLOAD_KEY_PREFIX = "uploads/"
 FRAME_KEY_PREFIX = "frames/"
 PAPER_KEY_PREFIX = "papers/"
+POST_KEY_PREFIX = "posts/"
 
 # --- Paper ingest --------------------------------------------------------------
 # Cheap guard on the fetch stage: a "PDF" bigger than this fails the source with
@@ -111,6 +113,17 @@ PAPER_CHUNK_OVERLAP = _int("PAPER_CHUNK_OVERLAP", 200)
 # Chunks per bge embed call in the paper flow (transcript chunks go in one call
 # because a talk has few; a 60-page paper does not).
 PAPER_EMBED_BATCH = _int("PAPER_EMBED_BATCH", 64)
+
+# --- Post ingest (markdown) -----------------------------------------------------
+# Much smaller cap than a paper: a long-form essay is tens of KB of text, so
+# anything near a megabyte is a mis-export (a whole archive, or a saved page
+# with its assets inlined) and failing fast beats indexing it.
+MAX_POST_MB = _int("MAX_POST_MB", 5)
+# Section-bounded chunking (rag/chunk.py chunk_markdown). Same defaults as the
+# paper knobs — the packer is shared; only the locator differs.
+POST_CHUNK_CHARS = _int("POST_CHUNK_CHARS", 1400)
+POST_CHUNK_OVERLAP = _int("POST_CHUNK_OVERLAP", 200)
+POST_EMBED_BATCH = _int("POST_EMBED_BATCH", 64)
 
 # --- Presigned uploads (browser -> bucket, bypassing the API) -----------------
 PRESIGN_EXPIRY_S = _int("PRESIGN_EXPIRY_S", 900)          # presigned PUT lifetime

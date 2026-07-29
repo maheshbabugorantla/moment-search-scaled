@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable, Sequence, TypeVar
+from typing import Iterable, Protocol, Sequence, TypeVar
 
 _PARA_SPLIT = re.compile(r"\n\s*\n")
 
@@ -35,6 +35,28 @@ class Chunk:
     idx: int    # 0-based position in the document's chunk sequence
     page: int   # 1-based page the chunk STARTS on
     text: str
+
+
+@dataclass(frozen=True)
+class PostChunk:
+    idx: int             # 0-based position in the post's chunk sequence
+    anchor: str          # heading slug — `{post_url}#{anchor}` scrolls the page
+    heading: str         # the trail: "Scaling laws > What breaks first"
+    anchor_native: bool  # False for a synthesised anchor that won't scroll
+    text: str            # heading path + body, exactly as embedded
+
+
+class SectionLike(Protocol):
+    """What chunking needs from a parsed section.
+
+    Structural rather than a concrete import: `Section` is a parse artifact and
+    lives in ingest/post.py, and `rag` must not depend on `ingest`.
+    """
+
+    anchor: str
+    heading: str
+    anchor_native: bool
+    paragraphs: Sequence[str]
 
 
 # ── The shared packer ─────────────────────────────────────────────────────────
@@ -138,5 +160,30 @@ def chunk_pages(pages: Sequence[str], *, max_chars: int = 1400,
     return [Chunk(idx=i, page=p, text=t) for i, (p, t) in enumerate(packed)]
 
 
-# `chunk_markdown` — the anchor-locator counterpart — lands next, on top of the
-# same three helpers.
+# ── Posts: anchor locators, chunks never cross a section ─────────────────────
+
+def chunk_markdown(sections: Sequence[SectionLike], *, max_chars: int = 1400,
+                   overlap_chars: int = 200, min_chars: int = 80) -> list[PostChunk]:
+    """Parsed sections -> ordered, anchor-carrying chunks.
+
+    Each section packs on its own, which IS the section-boundary rule: a chunk
+    can only ever hold paragraphs sharing one anchor. A section short enough to
+    fall under min_chars still ships as its own chunk when it has no same-anchor
+    predecessor — it has a distinct citation target, so folding it into the
+    previous section would misattribute it.
+
+    The heading path is prepended to the embedded text ("A > B\\n\\n<body>").
+    It is deterministic, it is what a reader sees above the passage, and posts
+    routinely write paragraphs that only make sense under their heading. It is
+    added AFTER packing, so it does not count against max_chars.
+    """
+    out: list[PostChunk] = []
+    for section in sections:
+        units = _explode(((0, p) for p in section.paragraphs), max_chars,
+                         overlap_chars)
+        for _, body in _merge_tiny_tail(_pack(units, max_chars), min_chars):
+            text = f"{section.heading}\n\n{body}" if section.heading else body
+            out.append(PostChunk(idx=len(out), anchor=section.anchor,
+                                 heading=section.heading,
+                                 anchor_native=section.anchor_native, text=text))
+    return out
