@@ -204,6 +204,42 @@ def test_the_decorative_image_is_never_indexed(
         assert f.get("anchor"), "an indexed image with no anchor cannot be cited"
 
 
+# ── The query path must survive an indexed post ──────────────────────────────
+
+@pytest.mark.mutating
+def test_asking_a_question_still_works_with_a_post_indexed(
+    client: httpx.Client, auth: dict, registered_post: str
+) -> None:
+    """The gap that let a 500 ship: every other test here reads Qdrant
+    directly, so nothing exercised /api/ask while a post was in the index.
+
+    A post's kept images live in the CLIP collection — they reuse the
+    frame_key layout on purpose — but they carry an `anchor`, not an `ms`.
+    search_text() excluded documents; search() did not, so a post image
+    ranking in the visual top-K reached the citation builder, which reads
+    fr["ms"] unconditionally and blew up the whole answer.
+
+    The question deliberately targets the fixture post's own subject matter,
+    so its chunks and its chart are the most likely things to rank.
+    """
+    row, _, _ = _wait_for_terminal(client, auth, registered_post)
+    assert row.get("status") == "indexed", row.get("error")
+
+    r = client.post("/api/ask",
+                    json={"question": "How does reciprocal rank fusion merge "
+                                      "ranked lists from different scorers?"})
+    assert r.status_code == 200, (
+        f"/api/ask returned {r.status_code} with a post indexed — "
+        f"a document leaked into a branch that assumes video: {r.text[:300]}")
+
+    body = r.json()
+    for c in body.get("citations", []):
+        assert (c.get("kind") or "video") == "video", (
+            f"a {c.get('kind')} citation reached the video Q&A path; it has no "
+            "timestamp to seek to and its deeplink cannot be rendered yet")
+        assert c.get("ms") is not None, f"citation with no timestamp: {c}"
+
+
 # ── The flowless-kind guarantee still holds ──────────────────────────────────
 
 def test_decks_remain_the_only_kind_without_a_flow(
