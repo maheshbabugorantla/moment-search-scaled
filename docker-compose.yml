@@ -77,5 +77,24 @@ services:
     # Need more throughput? Replicas multiply it (all share the one clip model):
     # docker compose up -d --scale worker=3   (-> 6 videos at once)
 
+  # Black-box contract tests against a running API. Profiled, so `up` never
+  # starts it; run it explicitly:
+  #   docker compose run --rm tests
+  # tests/ is bind-mounted rather than baked in, so editing a test needs no
+  # rebuild and the deployed image ships no test code.
+  tests:
+    build: .
+    profiles: ["test"]
+    command: pytest
+    env_file: .env
+    environment:
+      CONTRACT_BASE_URL: http://api:8000
+    volumes:
+      - ./tests:/app/tests:ro
+      - ./pytest.ini:/app/pytest.ini:ro
+    depends_on:
+      api:
+        condition: service_started
+
 volumes:
   hf_cache:
