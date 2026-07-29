@@ -121,6 +121,15 @@ def fetch_post(uri: str, user_id: str, doc_id: str) -> dict:
 
 TOP_ANCHOR = "_top"  # content before the first heading
 
+# YAML front matter, as every markdown exporter writes it: a --- fenced block
+# at the very top of the file. Substack/blog exporters put the canonical post
+# URL in there, which is the one piece of metadata this kind genuinely needs —
+# the citation deeplink is `{that url}#{anchor}`, and the registered URI may be
+# a storage:// key that no reader can follow.
+_FRONTMATTER = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n",
+                          re.DOTALL)
+_YAML_LINE = re.compile(r"^([A-Za-z][\w.-]*)\s*:\s*(.*)$")
+
 _ATX = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 # A pseudo-heading: a bold line ALONE on its line. Strict by design — Substack
 # authors who never type `#` write sections this way, but mid-paragraph bold is
@@ -158,6 +167,35 @@ class Section:
     anchor_native: bool    # False -> a synthesised anchor that won't scroll
     paragraphs: tuple[str, ...] = ()
     images: tuple[ImageRef, ...] = field(default=())
+
+
+def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """(metadata, body) — or ({}, text) when there is no front matter.
+
+    Parsed with a flat scanner rather than a YAML library on purpose: the
+    fields worth having are scalars (title, url, author, date), a real parser
+    would be a new dependency for that, and a malformed block must degrade to
+    "no metadata" rather than fail an ingest. Nested structures and list
+    syntax are simply not read.
+
+    Without this, every exported post indexes `title:`, `author:` and `tags:`
+    as prose in its very first chunk — the chunk most likely to be retrieved
+    for a query about what the post is.
+    """
+    match = _FRONTMATTER.match(text)
+    if not match:
+        return {}, text
+    meta: dict[str, str] = {}
+    for line in match.group(1).splitlines():
+        field = _YAML_LINE.match(line)
+        if not field:
+            continue  # a list item, a continuation, a comment — not a scalar
+        value = field.group(2).strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if value:
+            meta[field.group(1).lower()] = value
+    return meta, text[match.end():]
 
 
 def strip_inline(text: str) -> str:
@@ -238,7 +276,11 @@ def parse_markdown(text: str, *, title: str | None = None) -> list[Section]:
     Duplicate headings get `-1`, `-2` suffixes — and the FIRST occurrence stays
     bare, exactly as GitHub numbers them. Suffixing the first would break the
     deeplink for the common case, which is the whole point of the kind.
+
+    YAML front matter is stripped before anything else; use split_frontmatter()
+    directly when you also want the metadata.
     """
+    _, text = split_frontmatter(text)
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
     sections: list[Section] = []

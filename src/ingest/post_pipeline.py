@@ -36,7 +36,7 @@ from ..rag import vector_store
 from ..rag.chunk import chunk_markdown
 from ..rag.embeddings import embed_docs
 from .errors import SourceError, retry_unless_source_error
-from .post import fetch_post, parse_markdown, read_markdown
+from .post import fetch_post, parse_markdown, read_markdown, split_frontmatter
 
 
 class _Section:
@@ -72,6 +72,7 @@ def t_fetch_post(doc_id: str, user_id: str) -> dict:
         raise SourceError(f"no manifest row for {doc_id}")
     handle = fetch_post(row["uri"], user_id, doc_id)
     handle["title"] = row.get("title") or ""
+    handle["uri"] = row["uri"]  # the deeplink fallback when there is no metadata
     db.set_status(doc_id, "fetching", source_hash=handle["content_hash"],
                   storage_key=handle["storage_key"])
 
@@ -85,9 +86,15 @@ def t_fetch_post(doc_id: str, user_id: str) -> dict:
 
 
 @task(name="parse-post")  # no retries — a parse failure is deterministic
-def t_parse_post(doc_id: str, path: str, title: str) -> list[dict]:
+def t_parse_post(doc_id: str, path: str, title: str) -> dict:
     db.set_status(doc_id, "parsing")
-    sections = parse_markdown(read_markdown(Path(path)), title=title)
+    meta, body = split_frontmatter(read_markdown(Path(path)))
+    # An exporter's front matter knows the canonical post URL; the registered
+    # URI may be a storage:// key no reader can follow, and the deeplink a
+    # citation renders is `{that url}#{anchor}`. Adopt the exported title too
+    # when the operator gave none.
+    title = title or meta.get("title", "")
+    sections = parse_markdown(body, title=title)
     if not any(s.paragraphs for s in sections):
         # Markdown that parsed but carries no prose: an image dump, or a link
         # list. Reporting `indexed` with nothing indexed would be a lie.
@@ -102,9 +109,14 @@ def t_parse_post(doc_id: str, path: str, title: str) -> list[dict]:
     db.set_stage(doc_id, stage="parse", pct=35)
     # Prefect serialises task results; hand on plain dicts rather than the
     # frozen dataclasses so a resumed run deserialises without importing them.
-    return [{"anchor": s.anchor, "heading": s.heading,
-             "anchor_native": s.anchor_native,
-             "paragraphs": list(s.paragraphs)} for s in sections]
+    return {
+        "title": title,
+        "source_url": meta.get("url", ""),
+        "author": meta.get("author", ""),
+        "sections": [{"anchor": s.anchor, "heading": s.heading,
+                      "anchor_native": s.anchor_native,
+                      "paragraphs": list(s.paragraphs)} for s in sections],
+    }
 
 
 @task(name="chunk-post")  # no retries — pure function of the parse output
@@ -122,7 +134,8 @@ def t_chunk_post(doc_id: str, sections: list[dict]) -> list[dict]:
 
 
 @task(name="embed-upsert-post", retries=2, retry_delay_seconds=60)
-def t_embed_upsert_post(doc_id: str, user_id: str, chunks: list[dict]) -> int:
+def t_embed_upsert_post(doc_id: str, user_id: str, chunks: list[dict],
+                        source_url: str = "") -> int:
     """Batched bge embeddings -> idempotent upsert -> `indexed`.
 
     The status write comes strictly AFTER the last upsert returns — marking
@@ -143,6 +156,9 @@ def t_embed_upsert_post(doc_id: str, user_id: str, chunks: list[dict]) -> int:
                        "kind": "post", "modality": "text",
                        "anchor": c["anchor"], "heading": c["heading"],
                        "anchor_native": c["anchor_native"],
+                       # The deeplink Epic 4 renders is source_url#anchor.
+                       # Stored per point so a citation needs no second read.
+                       "source_url": source_url,
                        "text": c["text"], "embed_version": TEXT_EMBED_VERSION}
                       for c in batch],
             start_idx=start,  # ids stay unique across batches
@@ -169,9 +185,11 @@ def ingest_post(doc_id: str, user_id: str) -> dict:
             print(f"[ingest-post] {doc_id} skipped (duplicate content)")
             return {"doc_id": doc_id, "skipped": True}
         scratch = handle["scratch_path"]
-        sections = t_parse_post(doc_id, scratch, handle["title"])
+        parsed = t_parse_post(doc_id, scratch, handle["title"])
+        sections = parsed["sections"]
         chunks = t_chunk_post(doc_id, sections)
-        n = t_embed_upsert_post(doc_id, user_id, chunks)
+        n = t_embed_upsert_post(doc_id, user_id, chunks,
+                                parsed["source_url"] or handle["uri"])
         print(f"[ingest-post] {doc_id} indexed: {len(sections)} sections, "
               f"{n} chunks (attempt {attempt})")
         return {"doc_id": doc_id, "sections": len(sections), "chunks": n}

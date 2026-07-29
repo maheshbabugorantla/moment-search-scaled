@@ -15,9 +15,64 @@ from pathlib import Path
 import pytest
 
 from src.ingest.post import (TOP_ANCHOR, parse_markdown, post_key,
-                             read_markdown, slugify, strip_inline)
+                             read_markdown, slugify, split_frontmatter,
+                             strip_inline)
 from src.ingest.errors import SourceError
 from src.rag.chunk import chunk_markdown
+
+
+# ── Front matter: metadata, not prose ────────────────────────────────────────
+
+_EXPORT = '''---
+title: The Rise of the AI Engineer
+subtitle: "Emergent capabilities are creating an emerging title"
+author: Latent.Space
+date: 2023-06-30
+url: "https://www.latent.space/p/ai-engineer"
+tags: [ai-engineering, llms]
+---
+
+# The Rise of the AI Engineer
+
+The body starts here.
+'''
+
+
+def test_front_matter_is_read_as_metadata() -> None:
+    meta, body = split_frontmatter(_EXPORT)
+    assert meta["title"] == "The Rise of the AI Engineer"
+    assert meta["url"] == "https://www.latent.space/p/ai-engineer"   # unquoted
+    assert meta["author"] == "Latent.Space"
+    assert body.lstrip().startswith("# The Rise")
+
+
+def test_front_matter_never_reaches_a_chunk() -> None:
+    """Without this, every exported post indexes `title:`, `author:` and
+    `tags:` as prose in its FIRST chunk — the chunk most likely to be
+    retrieved for a question about what the post is."""
+    text = " ".join(p for s in parse_markdown(_EXPORT) for p in s.paragraphs)
+    for leaked in ("title:", "author:", "date:", "tags:", "subtitle:"):
+        assert leaked not in text
+    assert "The body starts here." in text
+
+
+def test_a_document_without_front_matter_is_untouched() -> None:
+    meta, body = split_frontmatter("# Title\n\nbody\n")
+    assert meta == {} and body == "# Title\n\nbody\n"
+
+
+def test_a_horizontal_rule_mid_document_is_not_mistaken_for_front_matter() -> None:
+    """`---` is also a horizontal rule; only a block at the very TOP counts."""
+    meta, body = split_frontmatter("intro\n\n---\n\nmore\n")
+    assert meta == {} and body.startswith("intro")
+
+
+def test_malformed_front_matter_degrades_to_no_metadata() -> None:
+    """A broken block must cost the metadata, never the ingest."""
+    meta, body = split_frontmatter("---\nnot: [a, valid\n  - yaml\n---\nbody\n")
+    assert "not" in meta            # the scalar-ish line is read
+    assert "- yaml" not in str(meta)  # the list continuation is skipped
+    assert body.strip() == "body"
 
 
 # ── Anchors: the whole reason this kind exists ───────────────────────────────
