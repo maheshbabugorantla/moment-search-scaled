@@ -155,7 +155,8 @@ def upsert_pending_document(doc: dict[str, Any]) -> dict:
 def set_status(video_id: str, status: str, *, error: str | None = None,
                title: str | None = None, frame_count: int | None = None,
                source_hash: str | None = None, embed_version: str | None = None,
-               progress: float | None = None) -> None:
+               progress: float | None = None,
+               storage_key: str | None = None) -> None:
     with pool().connection() as conn:
         conn.execute(
             """
@@ -164,12 +165,13 @@ def set_status(video_id: str, status: str, *, error: str | None = None,
                 frame_count = COALESCE(%s, frame_count),
                 source_hash = COALESCE(%s, source_hash),
                 embed_version = COALESCE(%s, embed_version),
+                storage_key = COALESCE(%s, storage_key),
                 progress = %s,
                 updated_at = now()
             WHERE id = %s
             """,
             (status, error, title, frame_count, source_hash, embed_version,
-             progress, video_id),
+             storage_key, progress, video_id),
         )
 
 
@@ -283,36 +285,39 @@ def count_inflight() -> int:
     return row["n"] if row else 0
 
 
-def wfq_claim(limit: int) -> list[dict]:
-    """Atomically claim up to `limit` pending VIDEOS in FAIR (round-robin across
-    users) order, flipping them pending -> queued. Returns the claimed rows.
+def wfq_claim(limit: int, kinds: tuple[str, ...] | None = None) -> list[dict]:
+    """Atomically claim up to `limit` pending sources in FAIR (round-robin
+    across users) order, flipping them pending -> queued. Returns the claimed
+    rows with their `kind`, which the dispatcher routes to the matching flow.
 
-    Scoped to kind='video'. The dispatcher hands whatever it claims to
-    jobs.enqueue_video(), so without this filter a pending paper would be
-    claimed and pushed through yt-dlp — failing with an incomprehensible error
-    on a row nothing had any business fetching. Documents wait `pending` until
-    their own flow exists (REC-309).
+    Scoped to DISPATCH_KINDS — the kinds that HAVE a flow. A kind outside the
+    list (deck, today) must sit `pending` rather than be claimed and crashed
+    through a pipeline that can't handle it; that filter is the hazard the
+    original kind='video' scope closed when papers had no flow either.
 
-    Fairness: rank each user's pending videos by age (row_number partitioned by
-    user_id), then order by that rank first — so we take everyone's oldest, then
-    everyone's 2nd, ... A user who dumped 50 videos only gets one slot per round,
-    exactly like the others. The UPDATE ... WHERE status='pending' RETURNING is
-    the atomic claim: if two dispatchers race, each row is handed out once.
+    Fairness: rank each user's pending sources by age (row_number partitioned
+    by user_id), then order by that rank first — so we take everyone's oldest,
+    then everyone's 2nd, ... A user's papers and videos share their round-robin
+    slot: fairness is per tenant, not per kind. The UPDATE ...
+    WHERE status='pending' RETURNING is the atomic claim: if two dispatchers
+    race, each row is handed out once.
     """
+    from .config import DISPATCH_KINDS
     if limit <= 0:
         return []
+    kind_list = list(kinds if kinds is not None else DISPATCH_KINDS)
     with pool().connection() as conn:
         picked = conn.execute(
             """
             SELECT id FROM (
                 SELECT id, row_number() OVER (
                     PARTITION BY user_id ORDER BY created_at, id) AS rn
-                FROM ms_videos WHERE status = 'pending' AND kind = 'video'
+                FROM ms_videos WHERE status = 'pending' AND kind = ANY(%s)
             ) t
             ORDER BY rn, id
             LIMIT %s
             """,
-            (limit,),
+            (kind_list, limit),
         ).fetchall()
         ids = [r["id"] for r in picked]
         if not ids:
@@ -320,10 +325,10 @@ def wfq_claim(limit: int) -> list[dict]:
         return conn.execute(
             """
             UPDATE ms_videos SET status = 'queued', updated_at = now()
-            WHERE id = ANY(%s) AND status = 'pending' AND kind = 'video'
-            RETURNING id, user_id
+            WHERE id = ANY(%s) AND status = 'pending' AND kind = ANY(%s)
+            RETURNING id, user_id, kind
             """,
-            (ids,),
+            (ids, kind_list),
         ).fetchall()
 
 
