@@ -34,34 +34,39 @@ NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 PROVIDERS = ("openai", "nvidia", "anthropic")
 
 SYSTEM = (
-    "You answer a user's question about a video using the numbered moments "
-    "provided as your evidence. Each moment has a timestamp and may include a "
-    "video FRAME (what was shown on screen) and/or a TRANSCRIPT excerpt (what was "
-    "said out loud). Use BOTH kinds of evidence: for a question about what someone "
-    "SAID or talked about, read the transcript text; for a question about what is "
-    "SHOWN, read the frame.\n"
+    "You answer a user's question using the numbered sources provided as your "
+    "evidence. Each source states WHERE it is — a timestamp in a talk, a page of "
+    "a paper, a slide of a deck, a section of a written post — and may include an "
+    "IMAGE (a video frame, a chart, a diagram) and/or a TEXT excerpt (what was "
+    "said out loud, or what was written). Use BOTH kinds of evidence: for a "
+    "question about what someone SAID or WROTE, read the text; for a question "
+    "about what is SHOWN, read the image.\n"
     "Rules:\n"
     "1. Read the question carefully and answer exactly what is asked. Start with a "
     "one-line direct answer, then explain in short paragraphs — ONE paragraph per "
     "distinct point. Keep it focused, don't pad. No preamble, don't restate the "
     "question.\n"
-    "2. Ground every claim in the moments and cite the moment number(s) in square "
-    "brackets, e.g. [1] or [2, 3]. When the question is about what was said, quote "
-    "the transcript accurately — keep the actual wording and numbers, don't alter "
-    "or round them.\n"
-    "3. Group the relevant moments by the point they make:\n"
-    "   - Moments that make the SAME point (especially several from the same "
-    "video) belong TOGETHER in ONE paragraph, cited together, e.g. [1, 2]. Do not "
-    "split one shared point across separate paragraphs.\n"
-    "   - Moments that make DIFFERENT points, or come from different videos, go in "
-    "SEPARATE paragraphs, each with its own citation.\n"
+    "2. Ground every claim in the sources and cite the source number(s) in square "
+    "brackets, e.g. [1] or [2, 3]. When the question is about what was said or "
+    "written, quote the text accurately — keep the actual wording and numbers, "
+    "don't alter or round them.\n"
+    "2b. NEVER write a locator of your own — no page numbers, slide numbers, "
+    "section names or timestamps. The reader's citation is built in code from "
+    "the sources above; a location you invent appears nowhere and is unverifiable. "
+    "Refer to a place only as [n].\n"
+    "3. Group the relevant sources by the point they make:\n"
+    "   - Sources that make the SAME point (especially several from the same "
+    "talk, paper or post) belong TOGETHER in ONE paragraph, cited together, e.g. "
+    "[1, 2]. Do not split one shared point across separate paragraphs.\n"
+    "   - Sources that make DIFFERENT points, or come from different documents, "
+    "go in SEPARATE paragraphs, each with its own citation.\n"
     "   Cover every distinct relevant point — don't merge unrelated ones and don't "
     "drop any.\n"
-    "4. Don't use outside knowledge or invent details that aren't in the moments.\n"
-    "5. Abstain ONLY as a last resort: if — and only if — none of the moments are "
+    "4. Don't use outside knowledge or invent details that aren't in the sources.\n"
+    "5. Abstain ONLY as a last resort: if — and only if — none of the sources are "
     "relevant to the question at all, reply with a single sentence saying you "
-    "couldn't find it in the video. If even one moment is relevant, ANSWER from "
-    "it; do not refuse just because the match is partial."
+    "couldn't find it. If even one source is relevant, ANSWER from it; do not "
+    "refuse just because the match is partial."
 )
 
 
@@ -95,11 +100,16 @@ def from_row(row: dict) -> LLMConfig:
 def _intro(question: str, n: int) -> str:
     return (
         f"QUESTION: {question}\n\n"
-        f"Answer this question using the {n} moments below (numbered 1 to {n}). "
-        "Each has a timestamp and a video frame and/or a transcript excerpt. If "
-        "the question is about what was said, use the transcript text. Give a "
-        "direct answer grounded in the relevant moment(s), cited as [n]. Only say "
-        "you couldn't find it if none of the moments are relevant."
+        f"Answer this question using the {n} sources below (numbered 1 to {n}). "
+        "Each states WHERE it is — a timestamp in a talk, a page of a paper, a "
+        "slide of a deck, a section of a post — and carries an image and/or a "
+        "text excerpt. If the question is about what was said or written, use "
+        "the text. Give a direct answer grounded in the relevant source(s), "
+        "cited as [n]. Only say you couldn't find it if none are relevant.\n\n"
+        "Cite by number only. Never write a page number, slide number, section "
+        "name or timestamp of your own — the locations shown above are the only "
+        "ones that exist, and the reader's citation is built from them, not "
+        "from your text."
     )
 
 
@@ -146,11 +156,22 @@ def _base_url(cfg: LLMConfig) -> str | None:
 
 
 def _label(i: int, m: dict) -> str:
-    line = f"[{i}] @ {m.get('timestamp', '')}"
+    """What the model is told about source [i].
+
+    `where` is the kind's own vocabulary ("14:13", "p. 4", "slide 12",
+    "§ Why now"). Handing a paper chunk a fake "00:00" — which is what a
+    timestamp-only label did — teaches the model that documents have
+    timestamps, and a model that believes that writes one back out.
+    """
+    where = m.get("where") or m.get("timestamp") or ""
+    title = (m.get("title") or "").strip()
+    line = f"[{i}] {title + ', ' if title else ''}{where}".rstrip(", ")
     if m.get("transcript"):
-        line += f' transcript: "{m["transcript"]}"'
+        # "text" rather than "transcript": a paper chunk was never spoken.
+        noun = "transcript" if m.get("kind", "video") == "video" else "text"
+        line += f' {noun}: "{m["transcript"]}"'
     if m.get("image") is None:
-        line += " (transcript only, no frame)"
+        line += " (text only, no image)"
     return line
 
 
