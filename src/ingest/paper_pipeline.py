@@ -35,7 +35,8 @@ from ..config import (PAPER_CHUNK_CHARS, PAPER_CHUNK_OVERLAP,
 from ..rag import vector_store
 from ..rag.chunk import chunk_pages
 from ..rag.embeddings import embed_docs
-from .paper import fetch_paper, parse_pdf, retry_unless_source_error
+from .paper import (PaperSourceError, fetch_paper, parse_pdf,
+                    retry_unless_source_error)
 
 
 @task(name="fetch-paper", retries=2, retry_delay_seconds=[30, 120],
@@ -49,7 +50,10 @@ def t_fetch_paper(doc_id: str, user_id: str) -> dict:
     db.set_status(doc_id, "fetching")
     row = db.get_video(doc_id)
     if row is None:
-        raise ValueError(f"no manifest row for {doc_id}")
+        # Deleted between dispatch and pickup (test cleanup, user delete).
+        # Deterministic — a PaperSourceError so the retry ladder is skipped
+        # instead of a vanished row occupying a worker slot for 150s.
+        raise PaperSourceError(f"no manifest row for {doc_id}")
     handle = fetch_paper(row["uri"], user_id, doc_id)
     db.set_status(doc_id, "fetching", source_hash=handle["content_hash"],
                   storage_key=handle["storage_key"])
