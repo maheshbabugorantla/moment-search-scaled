@@ -158,14 +158,14 @@ function applyMode(){
     $("#libTitle").textContent='Your videos';
     $("#libNote").innerHTML='YouTube videos are searched by <b>both</b> what\'s shown (frames) and what\'s said (transcript). Uploaded files are searched by picture only for now — no transcript yet. Tip: unselect the samples to search only your own uploads.';
   } else {
-    $("#heroBadge").innerHTML='● Sample project · four LLM talks, pre-indexed';
-    $("#heroTitle").innerHTML='A Deep Dive into <span class="text-coral">LLMs</span>.';
-    $("#heroSub").textContent='Ask anything about these four talks — MomentSearch finds the exact moment from what\'s shown on screen and what\'s said, and plays it right here.';
+    $("#heroBadge").innerHTML='● Talks, papers and posts — pre-indexed';
+    $("#heroTitle").innerHTML='One question, <span class="text-coral">every source</span>.';
+    $("#heroSub").textContent='Ask anything — MomentSearch answers from talks, papers and written posts together, and cites each one where it actually is: a timestamp, a page, a section.';
     $("#modeLink").textContent='Want your own videos? Get started →';   $("#modeLink").href='/get-started';
-    $("#libTitle").textContent='In this deep dive';
+    $("#libTitle").textContent='Indexed and searchable';
     $("#addTabs").classList.add("hidden");
     $("#addControls").classList.add("hidden");
-    $("#libNote").textContent='A curated set of LLM explainers and talks, indexed by what appears on screen.';
+    $("#libNote").textContent='Talks are searched by what appears on screen and what is said; papers and posts by their text and figures. Everything below is in scope for every question.';
   }
 }
 
@@ -194,18 +194,20 @@ async function loadConfig(){
 /* Query scoping: which indexed videos a question searches. Default = all
    selected; click a chip to include/exclude (e.g. unselect the samples to
    search only your own uploads). Full mode (/get-started) only. */
-let SELECTED=new Set(), KNOWN=new Set(), SAMPLE_INDEXED=[];
+let SELECTED=new Set(), KNOWN=new Set();
 const SELECTABLE = ()=> MODE==="full";
 async function loadVideos(){
   const {videos}=await (await fetch("/api/videos")).json();
   const box=$("#videos");
-  // Front page (/) shows & queries ONLY the 4 samples; /get-started shows all.
-  const shown = (MODE==="full") ? videos : videos.filter(v=>v.is_sample);
-  SAMPLE_INDEXED = videos.filter(v=>v.is_sample && v.status==="indexed").map(v=>v.id);
+  // Both views now list — and search — every indexed source. The front page
+  // stays read-only (no add, no delete, no per-source selection); what it can
+  // no longer do is show four talks while quietly searching only those four
+  // when the corpus holds papers and posts that answer the question better.
+  const shown = videos;
   if(!shown.length){
     box.innerHTML = MODE==="full"
-      ? '<span class="text-muted text-sm">No videos yet — add one above.</span>'
-      : '<span class="text-muted text-sm">The four sample talks index themselves on first start — they’ll appear here in a few minutes.</span>';
+      ? '<span class="text-muted text-sm">Nothing indexed yet — add a video above.</span>'
+      : '<span class="text-muted text-sm">The sample talks index themselves on first start — they’ll appear here in a few minutes.</span>';
     return shown;
   }
   const del = MODE==="full";
@@ -358,8 +360,11 @@ $("#go").onclick=async()=>{
   $("#article").innerHTML=`<div class="space-y-3"><div class="shimmer h-6 w-2/3 rounded"></div><div class="shimmer h-4 w-full rounded"></div><div class="shimmer h-4 w-5/6 rounded"></div></div>`;
   $("#sources").innerHTML=""; $("#go").disabled=true; $("#go").textContent="…";
   try{
-    // Front page (/) queries ONLY the samples; /get-started queries the selected set.
-    const video_ids = SELECTABLE() ? [...SELECTED] : SAMPLE_INDEXED;
+    // Front page (/) queries everything; /get-started queries the selected set.
+    // null = the whole corpus. The front page used to pin this to the four
+    // sample ids, which is why a question about a post came back "I couldn't
+    // find it" while the post sat indexed and reachable one page over.
+    const video_ids = SELECTABLE() ? [...SELECTED] : null;
     const r=await (await fetch("/api/ask",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({question:q, video_ids})})).json();
     CITES=r.citations||[];
@@ -398,10 +403,8 @@ function renderSources(){
   const note = $("#noSources");
   note.classList.toggle("hidden", !empty);
   if(empty){
-    note.textContent = SELECTABLE()
-      ? "No sources matched — nothing indexed was close enough to cite."
-      : "No sources matched. This page searches only the four sample talks — "
-        + "use “Get started” to search everything you've indexed.";
+    note.textContent =
+      "No sources matched — nothing indexed was close enough to cite.";
     $("#sources").innerHTML = "";
     return;
   }
@@ -512,11 +515,12 @@ $("#article").addEventListener("click",e=>{ const c=e.target.closest(".cite"); i
 /* The front page queries only the sample talks, so its examples stay visual.
    /get-started searches everything indexed, where the interesting questions
    are the ones a talk and a written source answer together. */
-const EXAMPLES = (window.MS_MODE==="full")
-  ? ["how should you choose what to work on?","the economics of AI data centre capex",
-     "how do you evaluate an LLM application?","what makes a moat in AI?"]
-  : ["a diagram of the attention mechanism","an animation of a neural network",
-     "a slide listing examples of large language models","a person speaking on stage next to slides"];
+// Both views search the whole corpus now, so both get questions that show it
+// off: two answered across kinds, one visual-only, one written-source-only.
+const EXAMPLES = ["how should you choose what to work on?",
+  "the economics of AI data centre capex",
+  "a diagram of the attention mechanism",
+  "how do you evaluate an LLM application?"];
 $("#examples").innerHTML=EXAMPLES.map(q=>`<span class="chip">${esc(q)}</span>`).join("");
 $("#examples").querySelectorAll(".chip").forEach(c=>c.onclick=()=>{ qEl.value=c.textContent; autogrow(); qEl.focus(); });
 
