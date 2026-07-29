@@ -1,43 +1,79 @@
 """Unit tests for PDF text normalization (REC-338).
 
-Every case here is drawn from text actually observed in the indexed corpus —
-the ligature and hyphenation examples are real strings from the Chollet, CLIP
-and BERT papers, not invented ones.
+The ligature and hyphenation examples are real strings from the indexed
+corpus (Chollet, CLIP, BERT), not invented ones. The rest exercise the
+breadth of Unicode presentation forms the tag-driven expansion is supposed to
+cover — and, just as importantly, the three tags it must refuse to touch.
 """
 from __future__ import annotations
 
-from src.ingest.textnorm import (dehyphenate, expand_ligatures, normalize_page,
+import pytest
+
+from src.ingest.textnorm import (dehyphenate, normalize_page,
+                                 normalize_unicode, typography_report,
                                  unwrap_lines)
 
 
-# ── Ligatures ─────────────────────────────────────────────────────────────────
+# ── Presentation forms expand, whatever script they come from ────────────────
 
-def test_the_fi_ligature_becomes_fi() -> None:
-    # The exact string that made an eval query ungradeable: the Chollet paper
-    # indexes as "efﬁciency" (ef + U+FB01 + ciency).
-    assert expand_ligatures("skill-acquisition efﬁciency") == \
-        "skill-acquisition efficiency"
-
-
-def test_every_latin_ligature_expands() -> None:
-    got = expand_ligatures("ﬀ ﬁ ﬂ ﬃ ﬄ")
-    assert got == "ff fi fl ffi ffl"
-
-
-def test_ordinary_text_is_untouched() -> None:
-    s = "efficiency of the flexible workflow"
-    assert expand_ligatures(s) == s
+@pytest.mark.parametrize("raw,want", [
+    ("skill-acquisition efﬁciency", "skill-acquisition efficiency"),  # the real one
+    ("ﬀ ﬁ ﬂ ﬃ ﬄ", "ff fi fl ffi ffl"),        # Latin ligature block
+    ("ｆｕｌｌwidth", "fullwidth"),                        # fullwidth Latin
+    ("𝐀𝐭𝐭𝐞𝐧𝐭𝐢𝐨𝐧 is all you need", "Attention is all you need"),   # math alphanumerics
+    ("section Ⅷ", "section VIII"),                        # Roman numerals
+    ("5 ㎡", "5 m²"),                                     # squared unit, superscript kept
+    ("call ℡ now", "call TEL now"),                       # symbol glyph
+])
+def test_presentation_forms_become_text(raw: str, want: str) -> None:
+    assert normalize_unicode(raw) == want
 
 
-def test_superscripts_and_fractions_survive() -> None:
-    """The reason this is a targeted map and not NFKC: NFKC would render
-    these as '102' and '1/2', silently corrupting a paper's numbers."""
-    s = "a 10² speedup on ½ the data"
+def test_arabic_contextual_forms_expand() -> None:
+    """Coverage is not Latin-only: the same tag rule handles Arabic
+    presentation forms, which a hand-written ligature list would miss."""
+    assert normalize_unicode("ﻻ") == "لا"
+
+
+# ── ...but meaning-bearing forms survive ─────────────────────────────────────
+
+@pytest.mark.parametrize("s", ["10² speedup", "H₂O", "½ the data", "x⁻¹"])
+def test_superscripts_subscripts_and_fractions_are_preserved(s: str) -> None:
+    """The reason this is tag-driven rather than NFKC: NFKC would render
+    these as '102', 'H2O' and '1⁄2', silently corrupting a paper's numbers."""
     assert normalize_page(s) == s
-    assert "²" in normalize_page(s)
 
 
-# ── De-hyphenation ────────────────────────────────────────────────────────────
+# ── Invisible characters ─────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("raw,want", [
+    ("ana­lysis", "analysis"),      # soft hyphen
+    ("we​ird", "weird"),            # zero-width space
+    ("a b", "a b"),                 # non-breaking space
+    ("﻿leading", "leading"),        # BOM
+])
+def test_invisibles_are_removed(raw: str, want: str) -> None:
+    assert normalize_unicode(raw) == want
+
+
+def test_joiners_are_kept_because_they_carry_meaning() -> None:
+    """ZWJ/ZWNJ change how Arabic and Indic text reads — not typography."""
+    assert "‍" in normalize_unicode("क्‍ष")
+
+
+# ── Typographic punctuation ──────────────────────────────────────────────────
+
+def test_smart_quotes_fold_to_ascii() -> None:
+    assert normalize_unicode("“quoted” and ’s") == '"quoted" and \'s'
+
+
+def test_an_exotic_hyphen_still_triggers_dehyphenation() -> None:
+    """A PDF hyphenating with U+2010 HYPHEN rather than ASCII would otherwise
+    slip past the de-hyphenation rule entirely."""
+    assert "efficiency" in normalize_page("effi‐\nciency")
+
+
+# ── De-hyphenation ───────────────────────────────────────────────────────────
 
 def test_a_syllable_break_is_rejoined() -> None:
     text = "measuring eﬃciency\n\nthe effi-\nciency of the method"
@@ -46,8 +82,7 @@ def test_a_syllable_break_is_rejoined() -> None:
 
 def test_a_real_compound_keeps_its_hyphen() -> None:
     """`skill-acquisition` split at its own hyphen must not become one word.
-    The hyphenated form appears elsewhere in the document, which is the
-    evidence used."""
+    The hyphenated form appearing elsewhere is the evidence used."""
     text = ("intelligence as skill-acquisition efficiency\n\n"
             "abilities that enable skill-\nacquisition in a domain")
     out = normalize_page(text)
@@ -56,14 +91,7 @@ def test_a_real_compound_keeps_its_hyphen() -> None:
 
 
 def test_an_unknown_split_defaults_to_joining() -> None:
-    """Neither form seen elsewhere — a syllable break is the commoner case."""
-    out = dehyphenate("the gener-\nalization gap")
-    assert "generalization gap" in out
-
-
-def test_joining_wins_when_the_joined_form_is_attested() -> None:
-    text = "generalization is hard\n\nthe gener-\nalization gap"
-    assert "generalization gap" in dehyphenate(text)
+    assert "generalization gap" in dehyphenate("the gener-\nalization gap")
 
 
 def test_hyphens_not_at_a_line_break_are_left_alone() -> None:
@@ -71,7 +99,7 @@ def test_hyphens_not_at_a_line_break_are_left_alone() -> None:
     assert dehyphenate(s) == s
 
 
-# ── Line unwrapping ───────────────────────────────────────────────────────────
+# ── Line unwrapping ──────────────────────────────────────────────────────────
 
 def test_soft_line_breaks_become_spaces() -> None:
     assert unwrap_lines("a sentence broken\nacross two lines") == \
@@ -81,26 +109,46 @@ def test_soft_line_breaks_become_spaces() -> None:
 def test_paragraph_breaks_survive() -> None:
     """The chunker splits paragraphs on blank lines — destroying them would
     destroy chunk structure."""
-    out = unwrap_lines("first para\nwrapped\n\nsecond para")
-    assert out == "first para wrapped\n\nsecond para"
+    assert unwrap_lines("first para\nwrapped\n\nsecond para") == \
+        "first para wrapped\n\nsecond para"
 
 
-# ── The pipeline, end to end ──────────────────────────────────────────────────
+# ── The pipeline, end to end ─────────────────────────────────────────────────
 
 def test_a_realistic_page_comes_out_as_prose() -> None:
     page = ("We deﬁne intelligence as skill-acquisition eﬃciency,\n"
             "which diﬀers from the classical view.\n\n"
             "This deﬁ-\nnition has consequences for the eval-\nuation of\n"
-            "artiﬁcial systems.")  # ligatures as pymupdf emits them
+            "artiﬁcial systems.")
     out = normalize_page(page)
-    assert "ﬁ" not in out and "ﬀ" not in out and "ﬃ" not in out
+    assert not any(c in out for c in "ﬁﬀﬃ")
     assert "definition has consequences" in out
     assert "evaluation of artificial systems" in out
     assert "differs from the classical view" in out
-    # Paragraph structure preserved for the chunker.
-    assert out.count("\n\n") == 1
+    assert out.count("\n\n") == 1  # paragraph structure preserved
 
 
 def test_normalization_is_deterministic() -> None:
     page = "eﬃcient sys-\ntems and their beneﬁts\nacross lines"
     assert normalize_page(page) == normalize_page(page)
+
+
+def test_clean_text_is_left_exactly_alone() -> None:
+    s = "A perfectly ordinary sentence, already clean.\n\nSecond paragraph."
+    assert normalize_page(s) == s
+
+
+# ── The detection report ─────────────────────────────────────────────────────
+
+def test_the_report_classifies_what_it_finds() -> None:
+    r = typography_report("efﬁ-\nciency 10² “x” ana­lysis")
+    assert r["presentation_form"] == 1     # the ﬁ ligature
+    assert r["preserved_semantic"] == 1    # the superscript
+    assert r["smart_punctuation"] == 2     # the curly quotes
+    assert r["invisible"] == 1             # the soft hyphen
+    assert r["hyphen_breaks"] == 1
+
+
+def test_the_report_is_empty_for_clean_text() -> None:
+    r = typography_report("nothing to see here")
+    assert not any(r.values())

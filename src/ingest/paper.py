@@ -32,6 +32,7 @@ import socket
 import sys
 import urllib.error
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
 from .. import storage
@@ -139,13 +140,24 @@ def parse_pdf(path: Path) -> list[str]:
     """
     import pymupdf
 
-    from .textnorm import normalize_page
+    from .textnorm import normalize_page, typography_report
 
     try:
         with pymupdf.open(path) as doc:
-            return [normalize_page(page.get_text("text")) for page in doc]
+            raw = [page.get_text("text") for page in doc]
     except Exception as exc:
         raise PaperSourceError(f"unreadable PDF: {exc}") from exc
+
+    # Log what typography this source carried. REC-338 was found by an ad-hoc
+    # script a month after the corpus was indexed; a one-line summary per
+    # ingest makes "how mangled is this PDF" answerable at the time.
+    found: Counter[str] = Counter()
+    for page_text in raw:
+        found.update(typography_report(page_text))
+    if found:
+        print(f"[parse] {path.name}: normalized " +
+              ", ".join(f"{v} {k}" for k, v in sorted(found.items()) if v))
+    return [normalize_page(page_text) for page_text in raw]
 
 
 def fetch_paper(uri: str, user_id: str, doc_id: str) -> dict:
