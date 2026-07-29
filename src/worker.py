@@ -20,6 +20,7 @@ import os
 import time
 
 from prefect import serve
+from prefect.deployments.runner import EntrypointType
 
 from .db import init_schema
 from .ingest.paper_pipeline import ingest_paper
@@ -42,9 +43,17 @@ def main():
         try:
             print(f"[worker] serving 'ms-ingest-video/ingest' + "
                   f"'ms-ingest-paper/ingest' (shared concurrency {limit})")
+            # MODULE_PATH entrypoints, deliberately. The default FILE_PATH makes
+            # the flow-run subprocess exec the pipeline file as a standalone
+            # script (prefect load_script_as_module) — where `from .. import db`
+            # dies with "attempted relative import beyond top-level package".
+            # A module entrypoint imports src.ingest.* as the real package, the
+            # same way this worker itself does.
             serve(
-                ingest_video.to_deployment(name="ingest"),
-                ingest_paper.to_deployment(name="ingest"),
+                ingest_video.to_deployment(
+                    name="ingest", entrypoint_type=EntrypointType.MODULE_PATH),
+                ingest_paper.to_deployment(
+                    name="ingest", entrypoint_type=EntrypointType.MODULE_PATH),
                 limit=limit,
             )
             break  # clean shutdown
