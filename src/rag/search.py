@@ -15,7 +15,8 @@ from typing import Any
 
 from .. import config, db, llm, storage
 from ..config import (BRANCH_TOP_K, CONFIDENCE_THRESHOLD, CROSS_MODAL_BOOST,
-                      FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_K)
+                      FUSION_WINDOW_S, RRF_K, TEXT_CONFIDENCE_THRESHOLD, TOP_ANCHOR,
+                      TOP_K)
 from . import vector_store
 from .embeddings import embed_query, embed_text
 
@@ -119,6 +120,101 @@ def _deeplink(video: dict | None, video_id: str, ms: int) -> str:
     return f"/api/video/{video_id}#t={secs}"
 
 
+# ── Locators: one scheme per kind ────────────────────────────────────────────
+#
+# A citation is only worth anything if its locator points at something a reader
+# can reach. Each kind names its position differently and each deeplinks
+# differently, so the three concerns — the structured locator, the human label,
+# and the URL — are derived together, per kind, from the winning window.
+#
+# The window carries the locator tuple _fuse() keyed on, so nothing here has to
+# re-derive which page/slide/anchor won: it reads the hits it already chose.
+
+def _public_url(meta: dict | None) -> str | None:
+    """Where a READER can find this source, or None.
+
+    `url` is the canonical address (a YouTube watch URL, a post's front-matter
+    URL). `uri` is where INGESTION fetched the bytes and is only publishable
+    when it happens to be a public http(s) address — an arXiv PDF link is;
+    `storage://papers/...` and `http://substack-fixtures/...` are not.
+    """
+    if not meta:
+        return None
+    url = (meta.get("url") or "").strip()
+    if url.startswith(("http://", "https://")):
+        return url
+    uri = (meta.get("uri") or "").strip()
+    # A compose-network hostname has no dot and resolves for nobody outside the
+    # network; treating it as public is how a citation gets a dead deeplink.
+    if uri.startswith("https://") or (uri.startswith("http://")
+                                      and "." in uri.split("/")[2].split(":")[0]):
+        return uri
+    return None
+
+
+def _locator_payload(kind: str, hit: dict, ms: int) -> dict:
+    """The structured locator, exactly as REC-314 specifies it per kind."""
+    if kind == "paper":
+        return {"page": hit.get("page")}
+    if kind == "deck":
+        return {"slide": hit.get("slide")}
+    if kind == "post":
+        return {"anchor": hit.get("anchor"),
+                "heading": hit.get("heading"),
+                # Whether {url}#{anchor} actually scrolls the live page. A
+                # synthesised anchor (a bold pseudo-heading) and the `_top`
+                # of a heading-less post are real locators for OUR index and
+                # honest citations, but no renderer will jump to them — so
+                # the UI links to the post itself rather than a fragment that
+                # silently does nothing.
+                "anchor_native": bool(hit.get("anchor_native"))}
+    return {"start_ms": ms, "end_ms": ms + int(FUSION_WINDOW_S * 1000)}
+
+
+def _label(kind: str, loc: dict) -> str:
+    """What a human reads in place of a timestamp."""
+    if kind == "paper":
+        return f"p. {loc['page']}" if loc.get("page") is not None else "paper"
+    if kind == "deck":
+        return f"slide {loc['slide']}" if loc.get("slide") is not None else "deck"
+    if kind == "post":
+        heading = (loc.get("heading") or "").strip()
+        if heading:
+            return f"§ {heading}"
+        # `_top` is the opening of a post that starts with prose. "the opening"
+        # is what it means; "_top" is an implementation detail.
+        return "the opening" if loc.get("anchor") == TOP_ANCHOR else "post"
+    return _seconds(loc["start_ms"])
+
+
+def _locator_deeplink(kind: str, meta: dict | None, source_id: str,
+                      loc: dict) -> str | None:
+    """Where clicking the citation lands. None when nothing can be reached —
+    an honest absence the UI renders as an unclickable citation, rather than a
+    link that 404s."""
+    url = _public_url(meta)
+    if kind == "video":
+        return _deeplink(meta, source_id, loc["start_ms"])
+    if kind == "post":
+        if not url:
+            return None
+        anchor = loc.get("anchor")
+        # `_top` is native in the sense that the top of a page always resolves,
+        # but there is no `id="_top"` to jump to — the bare URL already lands
+        # there, and `#_top` would look like a working fragment that isn't.
+        if anchor and anchor != TOP_ANCHOR and loc.get("anchor_native"):
+            return f"{url}#{anchor}"
+        return url
+    if kind in ("paper", "deck"):
+        page = loc.get("page") if kind == "paper" else loc.get("slide")
+        # #page=N is the PDF open-parameter every browser viewer honours; it is
+        # also harmless on a viewer that ignores it, which is why it can be
+        # appended to a bare arXiv link without checking.
+        base = url or f"/api/document/{source_id}"
+        return f"{base}#page={page}" if page is not None else base
+    return None
+
+
 def _thumb_url(user_id: str, video_id: str, idx: int) -> str:
     """Browser-facing thumbnail URL. Presigned GET straight to the bucket when
     the provider supports it (an <img> tag can't send auth headers); the API
@@ -169,22 +265,44 @@ def retrieve(question: str, user_id: str, *, top_k: int | None = None,
         vid = w["video_id"]
         meta = videos.get(vid)
         fr, tx = w["frame"], w["text"]
-        # Anchor on the frame's exact timestamp when there is one (precise visual
-        # seek); otherwise the transcript chunk's start.
-        ms = int(fr["ms"]) if fr else int(w["t"] * 1000)
-        idx = int(fr["idx"]) if fr else None
+        kind = w["kind"]
+        # Which hit describes the location differs by kind, and getting it
+        # backwards degrades quietly rather than crashing. A video window
+        # prefers its FRAME — that timestamp is the precise visual seek. A
+        # document window prefers its TEXT: a post image payload carries an
+        # `anchor` but no heading and no anchor_native (it is a frame_key
+        # point, not a chunk), so building the locator from it produced a
+        # citation labelled "post" that linked to the article root instead of
+        # "§ AI's $600B Question" linking to the section.
+        src = (fr or tx) if kind == "video" else (tx or fr)
+        loc = _locator_payload(kind, src or {},
+                               # video only: the frame's exact timestamp when
+                               # there is one (precise visual seek), else the
+                               # transcript chunk's start.
+                               int(fr["ms"]) if fr and fr.get("ms") is not None
+                               else int(w["t"] * 1000))
+        idx = int(fr["idx"]) if fr and fr.get("idx") is not None else None
+        label = _label(kind, loc)
         citations.append({
             "n": i,
+            # `sourceId`/`kind`/`locator` are the REC-314 payload; `video_id`
+            # and the flat fields below stay for the video UI that predates it.
+            "sourceId": vid,
+            "kind": kind,
+            "locator": loc,
+            "label": label,
             "video_id": vid,
             "title": (meta or {}).get("title") or vid,
-            "url": (meta or {}).get("url"),
+            "url": _public_url(meta),
             "source": (meta or {}).get("source"),
-            "ms": ms,
-            "timestamp": _seconds(ms),
+            # A document has no timestamp. Null rather than a plausible-looking
+            # 00:00, which is a lie a reader would act on.
+            "ms": loc["start_ms"] if kind == "video" else None,
+            "timestamp": label if kind == "video" else None,
             "idx": idx,
             "thumbnail": _thumb_url(user_id, vid, idx) if idx is not None else None,
             "media_url": _media_url(meta, user_id, vid),
-            "deeplink": _deeplink(meta, vid, ms),
+            "deeplink": _locator_deeplink(kind, meta, vid, loc),
             "score": round(w["rrf"], 4),
             "transcript": (tx or {}).get("text"),
             "modalities": sorted(w["modalities"]),
@@ -196,9 +314,9 @@ def _fallback_answer(citations: list[dict[str, Any]]) -> str:
     """No-LLM summary: rank the visually-closest moments. Honest about being
     similarity, not synthesis."""
     top = citations[0]
-    where = f"{top['title']} at {top['timestamp']}" if top.get("title") else top["timestamp"]
-    others = ", ".join(f"{c['timestamp']} [{c['n']}]" for c in citations[1:4])
-    msg = f"Closest visual match: {where} [{top['n']}] (similarity {top['score']})."
+    where = f"{top['title']} at {top['label']}" if top.get("title") else top["label"]
+    others = ", ".join(f"{c['label']} [{c['n']}]" for c in citations[1:4])
+    msg = f"Closest match: {where} [{top['n']}] (similarity {top['score']})."
     if others:
         msg += f" Other relevant moments: {others}."
     return msg
@@ -229,8 +347,13 @@ def _build_moments(user_id: str, citations: list[dict[str, Any]]) -> list[dict]:
 
     with ThreadPoolExecutor(max_workers=6) as ex:
         images = list(ex.map(frame_bytes, citations))
+    # `where` rather than `timestamp`: the model must be told a paper chunk is
+    # at "p. 4", not at "00:00". Handing every document a fake timestamp is how
+    # a model learns to write one back out.
     return [{"image": img, "transcript": c.get("transcript"),
-             "timestamp": c["timestamp"]} for img, c in zip(images, citations)]
+             "kind": c["kind"], "title": c.get("title"),
+             "where": c["label"], "timestamp": c["label"]}
+            for img, c in zip(images, citations)]
 
 
 def resolve_llm(user_id: str) -> tuple[llm.LLMConfig | None, str]:

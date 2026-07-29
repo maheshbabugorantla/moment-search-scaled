@@ -102,6 +102,11 @@ FRAME_KEY_PREFIX = "frames/"
 PAPER_KEY_PREFIX = "papers/"
 POST_KEY_PREFIX = "posts/"
 
+# The pseudo-anchor for content before a post's first heading. Shared
+# vocabulary rather than a parser detail: the read path has to recognise it to
+# know a citation cannot deeplink to a fragment (nothing renders `#_top`).
+TOP_ANCHOR = "_top"
+
 # --- Paper ingest --------------------------------------------------------------
 # Cheap guard on the fetch stage: a "PDF" bigger than this fails the source with
 # a readable reason instead of filling the worker's disk.

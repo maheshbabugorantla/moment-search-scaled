@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import storage
-from ..config import MAX_POST_MB, POST_KEY_PREFIX
+from ..config import MAX_POST_MB, POST_KEY_PREFIX, TOP_ANCHOR
 from .download import stream_to_file
 from .errors import SourceError
 from .fetch import scratch_dir, sha256_file
@@ -119,7 +119,9 @@ def fetch_post(uri: str, user_id: str, doc_id: str) -> dict:
 
 # ── Parse ─────────────────────────────────────────────────────────────────────
 
-TOP_ANCHOR = "_top"  # content before the first heading
+# TOP_ANCHOR ("_top", content before the first heading) now lives in config —
+# the read path has to recognise it too, to know such a citation cannot deeplink
+# to a fragment. Imported at the top of this module; still referenced here.
 
 # YAML front matter, as every markdown exporter writes it: a --- fenced block
 # at the very top of the file. Substack/blog exporters put the canonical post
