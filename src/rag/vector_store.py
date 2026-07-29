@@ -203,13 +203,17 @@ def upsert_chunks(user_id: str, video_id: str, vectors: np.ndarray,
 def search_text(vector: np.ndarray, user_id: str, *, top_k: int,
                 video_id: str | None = None,
                 video_ids: list[str] | None = None) -> list[dict[str, Any]]:
-    # The video Q&A path only. Document chunks (kind: paper/deck) share this
-    # collection but have no timestamp — fused as `t=0` "moments" they would
-    # cite a dead deeplink. They stay excluded until Epic 4 re-keys fusion on
-    # (kind, source, locator) and teaches citations to render a page/slide.
+    # The video Q&A path only. Document chunks (kind: paper/deck/post) share
+    # this collection but have no timestamp — fused as `t=0` "moments" they
+    # would cite a dead deeplink. They stay excluded until Epic 4 teaches
+    # citations to render a page, a slide or an anchor.
+    #
+    # `post` is here despite having a locator that WOULD deeplink: the anchor
+    # is real, but nothing renders it yet, and a citation nobody can follow is
+    # the same defect whatever the reason. Epic 4 lifts all three together.
     flt = _user_filter(user_id, video_id, video_ids)
-    flt.must_not = [qm.FieldCondition(key="kind",
-                                      match=qm.MatchAny(any=["paper", "deck"]))]
+    flt.must_not = [qm.FieldCondition(
+        key="kind", match=qm.MatchAny(any=["paper", "deck", "post"]))]
     try:
         hits = client().query_points(
             collection_name=TEXT_COLLECTION,

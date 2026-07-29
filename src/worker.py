@@ -2,12 +2,12 @@
 
     python -m src.worker
 
-serve() registers the "ms-ingest-video/ingest" and "ms-ingest-paper/ingest"
-deployments in Prefect Cloud (idempotent) and long-polls for scheduled runs —
-outbound HTTPS only, no ports. The `limit` is Runner-global: videos and papers
-share the same WORKER_CONCURRENCY execution slots, which matches the
-dispatcher's single DISPATCH_MAX_INFLIGHT accounting. Scale horizontally by
-running more replicas of this process.
+serve() registers the "ms-ingest-video/ingest", "ms-ingest-paper/ingest" and
+"ms-ingest-post/ingest" deployments in Prefect Cloud (idempotent) and long-polls
+for scheduled runs — outbound HTTPS only, no ports. The `limit` is
+Runner-global: every kind shares the same WORKER_CONCURRENCY execution slots,
+which matches the dispatcher's single DISPATCH_MAX_INFLIGHT accounting. Scale
+horizontally by running more replicas of this process.
 
 Sample seeding is NOT done here — it's a one-shot startup gate (seed.py /
 src/seeding.py) that the whole stack waits on, so the app never serves a
@@ -25,6 +25,7 @@ from prefect.deployments.runner import EntrypointType
 from .db import init_schema
 from .ingest.paper_pipeline import ingest_paper
 from .ingest.pipeline import ingest_video
+from .ingest.post_pipeline import ingest_post
 
 
 def main():
@@ -42,7 +43,8 @@ def main():
     while True:
         try:
             print(f"[worker] serving 'ms-ingest-video/ingest' + "
-                  f"'ms-ingest-paper/ingest' (shared concurrency {limit})")
+                  f"'ms-ingest-paper/ingest' + 'ms-ingest-post/ingest' "
+                  f"(shared concurrency {limit})")
             # MODULE_PATH entrypoints, deliberately. The default FILE_PATH makes
             # the flow-run subprocess exec the pipeline file as a standalone
             # script (prefect load_script_as_module) — where `from .. import db`
@@ -53,6 +55,8 @@ def main():
                 ingest_video.to_deployment(
                     name="ingest", entrypoint_type=EntrypointType.MODULE_PATH),
                 ingest_paper.to_deployment(
+                    name="ingest", entrypoint_type=EntrypointType.MODULE_PATH),
+                ingest_post.to_deployment(
                     name="ingest", entrypoint_type=EntrypointType.MODULE_PATH),
                 limit=limit,
             )

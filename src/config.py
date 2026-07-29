@@ -167,7 +167,7 @@ INFLIGHT_STATUSES = ("queued", "fetching", "parsing", "chunking", "sampling",
 # purpose: it has no flow yet, so pending decks must SIT pending rather than be
 # claimed and crashed through a pipeline that can't handle them (the same
 # hazard wfq_claim's kind filter originally closed for papers).
-DISPATCH_KINDS = ("video", "paper")
+DISPATCH_KINDS = ("video", "paper", "post")
 
 # --- Fair scheduling (WFQ) ----------------------------------------------------
 # FIFO (default off): register enqueues to Prefect immediately -> Prefect runs

@@ -45,6 +45,13 @@ def _dhit(doc_id: str, slide: int, score: float = 0.6) -> dict:
             "text": f"slide {slide} text"}
 
 
+def _pohit(doc_id: str, anchor: str, score: float = 0.6, chunk: int = 0) -> dict:
+    """A post chunk hit — kind: post, heading-anchor locator, no timestamp."""
+    return {"score": score, "user_id": "u", "video_id": doc_id,
+            "kind": "post", "anchor": anchor, "modality": "text",
+            "text": f"{anchor} chunk {chunk}"}
+
+
 # ── Video behaviour is unchanged ─────────────────────────────────────────────
 
 def test_video_hits_within_the_window_still_merge() -> None:
@@ -144,3 +151,42 @@ def test_a_slide_with_text_and_caption_gets_the_cross_modal_boost() -> None:
     # Boosted above what either single-modality rrf could be alone.
     solo = _fuse([], [_dhit("deck_z", 3)])[0]["rrf"]
     assert windows[0]["rrf"] > 2 * solo * 0.9
+
+
+# ── Posts bucket per heading anchor ──────────────────────────────────────────
+
+def test_three_matching_sections_yield_three_windows() -> None:
+    windows = _fuse([], [_pohit("doc_p", "scaling-laws"),
+                         _pohit("doc_p", "what-breaks-first"),
+                         _pohit("doc_p", "_top")])
+    assert len(windows) == 3
+    assert {w["locator"][2] for w in windows} == {"scaling-laws",
+                                                 "what-breaks-first", "_top"}
+    assert all(w["kind"] == "post" for w in windows)
+
+
+def test_two_chunks_of_one_section_collapse_into_one_window() -> None:
+    """The other direction, and the one worth writing down: a long section
+    splits into several chunks that all cite ONE anchor, so collapsing them is
+    correct — it is not the paper bug (one window per document) reappearing.
+    The best chunk represents the section, as within any other window."""
+    windows = _fuse([], [_pohit("doc_p", "scaling-laws", 0.9, chunk=0),
+                         _pohit("doc_p", "scaling-laws", 0.4, chunk=1)])
+    assert len(windows) == 1
+    assert windows[0]["text"]["score"] == 0.9
+
+
+def test_the_same_anchor_in_two_posts_does_not_collide() -> None:
+    """`_top` and `introduction` are the two most common slugs on earth."""
+    windows = _fuse([], [_pohit("doc_p", "_top"), _pohit("doc_q", "_top")])
+    assert len(windows) == 2
+    assert {w["video_id"] for w in windows} == {"doc_p", "doc_q"}
+
+
+def test_a_post_at_t_zero_does_not_swallow_a_paper_at_t_zero() -> None:
+    """Three kinds all land at t=0.0; only the kind in the key keeps them
+    apart."""
+    windows = _fuse([_vhit("yt_a", 0.0)],
+                    [_phit("doc_x", 1), _pohit("doc_p", "_top")])
+    assert len(windows) == 3
+    assert {w["kind"] for w in windows} == {"video", "paper", "post"}

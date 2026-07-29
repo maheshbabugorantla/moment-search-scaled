@@ -169,3 +169,53 @@ def fixture_pdf() -> Response:
     body = doc.tobytes()
     doc.close()
     return Response(content=body, media_type="application/pdf")
+
+
+# Three sections, one DUPLICATE heading (so the -1 suffix is exercised end to
+# end), one bold pseudo-heading, and two images whose URLs alone tell the
+# heuristic filter what they are. Deliberately not a lorem dump: the lifecycle
+# test asserts on the anchors this produces.
+_FIXTURE_POST = """# MomentSearch fixture post
+
+An opening paragraph before any second-level heading, which the parser files
+under the `_top` pseudo-anchor because every renderer resolves the page itself.
+
+![decorative banner](https://example.invalid/fixtures/banner-1200x100.png)
+
+## Retrieval
+
+Retrieval augmented generation combines a retriever with a generator so that
+answers cite their sources instead of asserting them. The retriever decides
+what the generator is allowed to know.
+
+![a chart of recall against corpus size](https://example.invalid/fixtures/chart-600x400.png)
+
+## Fusion
+
+Reciprocal rank fusion merges ranked lists from incomparable scorers by rank
+alone, which is why two branches can disagree entirely on score scale and
+still fuse into one ordering.
+
+**Why rank and not score**
+
+Because a CLIP cosine near 0.3 and a bge cosine near 0.7 can describe equally
+strong matches, and normalising them against each other assumes a calibration
+neither model promises.
+
+## Retrieval
+
+A second section with the same heading as an earlier one, which must receive
+the `-1` suffix while the first keeps the bare anchor — the numbering GitHub
+and Substack both produce.
+"""
+
+
+@router.get("/fixtures/tiny.md")
+def fixture_markdown() -> Response:
+    """A tiny markdown post — the post lifecycle contract test registers THIS
+    URL so a real end-to-end ingest needs no external network.
+
+    Unauthenticated for the same reason as tiny.pdf: the worker's fetch sends
+    no bearer token, and the content is fixture text.
+    """
+    return Response(content=_FIXTURE_POST, media_type="text/markdown")

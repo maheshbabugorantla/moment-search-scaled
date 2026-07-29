@@ -195,15 +195,26 @@ def test_a_deck_is_not_claimed_by_the_dispatcher(
 
 
 @pytest.mark.mutating
-def test_a_post_is_not_claimed_by_the_dispatcher_yet(
+def test_a_post_with_a_dead_uri_is_dispatched_and_fails_readably(
     client: httpx.Client, registered
 ) -> None:
-    """REC-334 accepts the kind; it deliberately does NOT add it to
-    DISPATCH_KINDS. A claimed post with no flow is exactly the hazard the deck
-    test above pins. REC-336 replaces this test with the lifecycle walk."""
+    """Posts have a flow now (REC-336), so they ARE claimed — and a
+    deterministic fetch failure (this URI 404s or serves HTML, never markdown)
+    reaches `failed` fast, because SourceError skips the 30s+120s ladder."""
     doc_id = registered(POST_URI, "post").json()["id"]
-    time.sleep(12)
-    assert client.get(f"/api/videos/{doc_id}").json()["status"] == "pending"
+    deadline = time.monotonic() + 60
+    row = {}
+    while time.monotonic() < deadline:
+        row = client.get(f"/api/videos/{doc_id}").json()
+        if row.get("status") == "failed":
+            break
+        time.sleep(2)
+    assert row.get("status") == "failed", (
+        f"post stuck in {row.get('status')!r} — was it never dispatched, "
+        "or did a dead URI burn the full retry ladder?")
+    assert row.get("error"), "failed with no reason recorded"
+    assert "Traceback" not in row["error"]
+    assert "\n" not in row["error"].strip()
 
 
 @pytest.mark.mutating
