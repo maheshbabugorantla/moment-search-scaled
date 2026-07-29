@@ -17,6 +17,7 @@ from conftest import CORPUS_IDS
 
 PAPER_URI = "https://example.com/contract-test-paper.pdf"
 DECK_URI = "storage://decks/contract-test-deck.pdf"
+POST_URI = "https://example.com/contract-test-post.md"
 # Deliberately unreachable — a 202 here is the assertion that matters.
 UNREACHABLE_URI = "https://example.invalid/probe_7.pdf"
 
@@ -75,6 +76,15 @@ def test_deck_returns_202_with_a_storage_uri(registered) -> None:
     r = registered(DECK_URI, "deck", "KDD Keynote")
     assert r.status_code == 202
     assert r.json()["kind"] == "deck"
+
+
+@pytest.mark.mutating
+def test_post_returns_202_with_a_markdown_uri(registered) -> None:
+    """The schema gate (REC-334): before migration 003 this died at the INSERT
+    and surfaced as a 502 — the wrong error for a supported kind."""
+    r = registered(POST_URI, "post", "Scaling laws, revisited")
+    assert r.status_code == 202
+    assert r.json()["kind"] == "post"
 
 
 @pytest.mark.mutating
@@ -182,6 +192,29 @@ def test_a_deck_is_not_claimed_by_the_dispatcher(
     # The dispatcher polls on an interval; give it several rounds to misbehave.
     time.sleep(12)
     assert client.get(f"/api/videos/{doc_id}").json()["status"] == "pending"
+
+
+@pytest.mark.mutating
+def test_a_post_with_a_dead_uri_is_dispatched_and_fails_readably(
+    client: httpx.Client, registered
+) -> None:
+    """Posts have a flow now (REC-336), so they ARE claimed — and a
+    deterministic fetch failure (this URI 404s or serves HTML, never markdown)
+    reaches `failed` fast, because SourceError skips the 30s+120s ladder."""
+    doc_id = registered(POST_URI, "post").json()["id"]
+    deadline = time.monotonic() + 60
+    row = {}
+    while time.monotonic() < deadline:
+        row = client.get(f"/api/videos/{doc_id}").json()
+        if row.get("status") == "failed":
+            break
+        time.sleep(2)
+    assert row.get("status") == "failed", (
+        f"post stuck in {row.get('status')!r} — was it never dispatched, "
+        "or did a dead URI burn the full retry ladder?")
+    assert row.get("error"), "failed with no reason recorded"
+    assert "Traceback" not in row["error"]
+    assert "\n" not in row["error"].strip()
 
 
 @pytest.mark.mutating

@@ -96,9 +96,11 @@ def gcs_service_account_info() -> dict:
 #   papers/{user_id}/{sha256}.pdf           fetched PDFs, content-addressed —
 #                                           the same paper registered twice
 #                                           resolves to one object
+#   posts/{user_id}/{sha256}.md             fetched markdown, content-addressed
 UPLOAD_KEY_PREFIX = "uploads/"
 FRAME_KEY_PREFIX = "frames/"
 PAPER_KEY_PREFIX = "papers/"
+POST_KEY_PREFIX = "posts/"
 
 # --- Paper ingest --------------------------------------------------------------
 # Cheap guard on the fetch stage: a "PDF" bigger than this fails the source with
@@ -111,6 +113,52 @@ PAPER_CHUNK_OVERLAP = _int("PAPER_CHUNK_OVERLAP", 200)
 # Chunks per bge embed call in the paper flow (transcript chunks go in one call
 # because a talk has few; a 60-page paper does not).
 PAPER_EMBED_BATCH = _int("PAPER_EMBED_BATCH", 64)
+
+# --- Post ingest (markdown) -----------------------------------------------------
+# Much smaller cap than a paper: a long-form essay is tens of KB of text, so
+# anything near a megabyte is a mis-export (a whole archive, or a saved page
+# with its assets inlined) and failing fast beats indexing it.
+MAX_POST_MB = _int("MAX_POST_MB", 5)
+# Section-bounded chunking (rag/chunk.py chunk_markdown). Same defaults as the
+# paper knobs — the packer is shared; only the locator differs.
+POST_CHUNK_CHARS = _int("POST_CHUNK_CHARS", 1400)
+POST_CHUNK_OVERLAP = _int("POST_CHUNK_OVERLAP", 200)
+POST_EMBED_BATCH = _int("POST_EMBED_BATCH", 64)
+
+# Image worthiness (src/ingest/post_images.py). Off flips posts to text-only
+# without touching the flow — the classifier is the newest code here, so it
+# gets a switch.
+POST_INDEX_IMAGES = _envbool("POST_INDEX_IMAGES", True)
+# Heuristic layer. Only the unambiguous shapes are hard drops: an animated GIF
+# is a reaction image, and anything thinner than this on a side is an icon, a
+# badge or a tracking pixel.
+POST_IMAGE_MIN_PX = _int("POST_IMAGE_MIN_PX", 200)
+POST_IMAGE_MAX_MB = _int("POST_IMAGE_MAX_MB", 10)
+# Wider than this is banner-SHAPED, which is a demotion rather than a veto —
+# see POST_IMAGE_WIDE_PENALTY below for why it stopped being a hard drop.
+POST_IMAGE_MAX_ASPECT = _float("POST_IMAGE_MAX_ASPECT", 4.0)
+# CLIP layer: informative must BEAT decorative by a margin and clear a floor.
+# "Closer to chart than to photo" is a weaker claim than "is a chart", which is
+# why both conditions exist. The floor sits in the same ballpark as
+# CONFIDENCE_THRESHOLD — the same CLIP cosine scale.
+POST_IMAGE_MARGIN = _float("POST_IMAGE_MARGIN", 0.02)
+POST_IMAGE_MIN_SCORE = _float("POST_IMAGE_MIN_SCORE", 0.22)
+# An image before the first heading is nearly always cover art, so it faces a
+# HIGHER floor rather than a hard drop — a rare post leads with its key chart,
+# and vetoing position 0 would lose exactly the image most worth citing.
+POST_IMAGE_HERO_PENALTY = _float("POST_IMAGE_HERO_PENALTY", 0.03)
+# Banner-SHAPED gets the same treatment, and for a measured reason: on the
+# first real seven-post corpus, every image the aspect rule vetoed outright
+# was a genuine figure — a horizontal number line at 4.8:1, a
+# Data->Model->Product flow diagram at 5.9:1 that was the most citable image
+# in its post. Both score ~0.27 informative. Wide decorative strips are almost
+# always thin in absolute terms too, so POST_IMAGE_MIN_PX still vetoes them.
+POST_IMAGE_WIDE_PENALTY = _float("POST_IMAGE_WIDE_PENALTY", 0.03)
+# Alt text that names a figure ("chart", "diagram", "table") relaxes the floor.
+# A heuristic rather than a second embedding on purpose: scoring alt text in
+# CLIP space would mix text-text and text-image cosines, which live on
+# different scales — the calibration error RRF exists to avoid.
+POST_IMAGE_ALT_BONUS = _float("POST_IMAGE_ALT_BONUS", 0.03)
 
 # --- Presigned uploads (browser -> bucket, bypassing the API) -----------------
 PRESIGN_EXPIRY_S = _int("PRESIGN_EXPIRY_S", 900)          # presigned PUT lifetime
@@ -127,10 +175,11 @@ VIDEO_STATUSES = ("pending", "queued", "fetching", "sampling", "embedding",
                   "indexed", "skipped", "failed")
 
 # --- Source manifest (multi-kind) ---------------------------------------------
-# What a manifest row can describe. Videos are the only kind the pipeline writes
-# today; `paper` and `deck` are accepted by the schema ahead of their flows so
-# the migration lands before anything depends on it.
-SOURCE_KINDS = ("video", "paper", "deck")
+# What a manifest row can describe. `deck` is still accepted by the schema ahead
+# of its flow — the migration lands before anything depends on it. `post` is
+# markdown: same document lifecycle as a paper, but cited by heading anchor
+# instead of page number (migration 003).
+SOURCE_KINDS = ("video", "paper", "deck", "post")
 
 # The full lifecycle across kinds. Documents add two stages videos don't have:
 # `parsing` (PDF -> per-page text) and `chunking` (pages -> page-aware chunks),
@@ -153,7 +202,7 @@ INFLIGHT_STATUSES = ("queued", "fetching", "parsing", "chunking", "sampling",
 # purpose: it has no flow yet, so pending decks must SIT pending rather than be
 # claimed and crashed through a pipeline that can't handle them (the same
 # hazard wfq_claim's kind filter originally closed for papers).
-DISPATCH_KINDS = ("video", "paper")
+DISPATCH_KINDS = ("video", "paper", "post")
 
 # --- Fair scheduling (WFQ) ----------------------------------------------------
 # FIFO (default off): register enqueues to Prefect immediately -> Prefect runs

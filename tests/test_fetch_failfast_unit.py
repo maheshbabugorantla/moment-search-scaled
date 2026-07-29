@@ -64,9 +64,22 @@ def test_paper_fetch_raises_a_source_error_for_a_vanished_row(monkeypatch) -> No
         paper_pipeline.t_fetch_paper.fn("doc_gone", "default")
 
 
-def test_both_fetch_tasks_carry_the_retry_condition() -> None:
-    """The classification is inert unless the task consults it."""
-    from src.ingest import paper_pipeline
+def test_post_fetch_raises_a_source_error_for_a_vanished_row(monkeypatch) -> None:
+    from src.ingest import post_pipeline
+
+    monkeypatch.setattr(post_pipeline.db, "set_status", lambda *a, **k: None)
+    monkeypatch.setattr(post_pipeline.db, "get_video", lambda vid: None)
+    with pytest.raises(SourceError, match="no manifest row"):
+        post_pipeline.t_fetch_post.fn("doc_gone", "default")
+
+
+def test_every_fetch_task_carries_the_retry_condition() -> None:
+    """The classification is inert unless the task consults it. Every kind's
+    fetch stage must opt in — and this is the assertion that catches a fourth
+    flow arriving without it, which is precisely how the video flow came to be
+    burning the ladder while the paper flow did not."""
+    from src.ingest import paper_pipeline, post_pipeline
 
     assert pipeline.t_fetch.retry_condition_fn is retry_unless_source_error
     assert paper_pipeline.t_fetch_paper.retry_condition_fn is retry_unless_source_error
+    assert post_pipeline.t_fetch_post.retry_condition_fn is retry_unless_source_error

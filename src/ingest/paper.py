@@ -26,22 +26,16 @@ Debug entrypoint (REC-307's verify):
 """
 from __future__ import annotations
 
-import hashlib
 import json
-import socket
 import sys
-import urllib.error
-import urllib.request
 from collections import Counter
 from pathlib import Path
 
 from .. import storage
 from ..config import MAX_PAPER_MB, PAPER_KEY_PREFIX
+from .download import stream_to_file
 from .errors import SourceError, retry_unless_source_error  # noqa: F401
 from .fetch import scratch_dir, sha256_file
-
-_CHUNK = 1 << 20  # 1 MB read granularity — bounded memory whatever the PDF size
-_HTTP_TIMEOUT_S = 60
 
 
 # The classification moved to ingest/errors.py once the video flow needed it
@@ -74,38 +68,13 @@ def _check_size(byte_count: int) -> None:
 
 def _stream_http(uri: str, dest: Path) -> tuple[str, int]:
     """GET the URI to `dest`, hashing and cap-checking as chunks arrive.
-    Returns (sha256, byte_size). Never holds more than one chunk in memory."""
-    req = urllib.request.Request(uri, headers={"User-Agent": "momentsearch/1.0"})
-    try:
-        resp = urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S)
-    except urllib.error.HTTPError as exc:
-        if 400 <= exc.code < 500:  # deterministic: the URI is wrong, not the network
-            raise PaperSourceError(f"HTTP {exc.code} fetching the PDF") from exc
-        raise  # 5xx — the server may recover; let the retry policy have it
-    except urllib.error.URLError as exc:
-        if isinstance(exc.reason, socket.gaierror):  # NXDOMAIN — the host doesn't exist
-            raise PaperSourceError(f"no such host: {exc.reason}") from exc
-        raise  # timeout / connection refused — retryable
 
-    with resp:
-        declared = resp.headers.get("Content-Length")
-        if declared and declared.isdigit():
-            _check_size(int(declared))
-        h = hashlib.sha256()
-        size = 0
-        first = True
-        with dest.open("wb") as fh:
-            while chunk := resp.read(_CHUNK):
-                if first:
-                    check_pdf_magic(chunk)
-                    first = False
-                size += len(chunk)
-                _check_size(size)  # servers lie about Content-Length; count anyway
-                h.update(chunk)
-                fh.write(chunk)
-        if first:  # zero bytes arrived
-            raise PaperSourceError("the URI returned an empty body")
-    return h.hexdigest(), size
+    The body moved to ingest/download.py once the post flow needed the same
+    guards and the same retryable-vs-not classification. MAX_PAPER_MB is read
+    HERE, at call time, so the cap stays a property of this module.
+    """
+    return stream_to_file(uri, dest, max_mb=MAX_PAPER_MB, what="PDF",
+                          first_chunk_check=check_pdf_magic)
 
 
 def _page_count(path: Path) -> int:

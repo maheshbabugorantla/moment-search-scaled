@@ -51,6 +51,11 @@ def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
         extracted text and a vision caption gets the same cross-modal boost a
         frame+transcript match gets: that is a decision, not an accident —
         two independent readings of one slide agreeing IS the same signal.
+      * post — hits under the same heading anchor of the same post. Section
+        level, not chunk level, deliberately: a long section splits into
+        several chunks that all cite ONE anchor, so collapsing them is
+        correct, not the bug this key exists to fix. Two chunks of one section
+        are one citation; two sections are two.
     """
     def ranked(hits, modality):
         out = []
@@ -66,6 +71,8 @@ def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
             return (kind, h["video_id"], h.get("page"))
         if kind == "deck":
             return (kind, h["video_id"], h.get("slide"))
+        if kind == "post":
+            return (kind, h["video_id"], h.get("anchor"))
         return ()  # video: matched by time proximity below, not by this key
 
     windows: list[dict] = []

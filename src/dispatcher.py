@@ -39,6 +39,8 @@ def dispatch_once() -> int:
         try:
             if row["kind"] == "paper":
                 jobs.enqueue_paper(row["id"], row["user_id"])
+            elif row["kind"] == "post":
+                jobs.enqueue_post(row["id"], row["user_id"])
             else:
                 jobs.enqueue_video(row["id"], row["user_id"])
         except Exception as exc:

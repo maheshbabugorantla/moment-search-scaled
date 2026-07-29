@@ -45,6 +45,11 @@ def test_sources_with_wrong_token_is_401(client: httpx.Client) -> None:
 _SOURCE_FIELDS = {"id", "kind", "status", "title", "pct", "uri", "error",
                   "created_at", "updated_at"}
 
+# Pinned here rather than imported from src.config on purpose: this is a wire
+# contract, and a test that derives the vocabulary from the code can never catch
+# an accidental widening of it. Adding a kind is meant to cost this one line.
+_SOURCE_KINDS = {"video", "paper", "deck", "post"}
+
 
 def test_every_source_carries_the_documented_fields(
     client: httpx.Client, auth: dict
@@ -54,7 +59,7 @@ def test_every_source_carries_the_documented_fields(
     assert body["sources"]
     for s in body["sources"]:
         assert set(s) == _SOURCE_FIELDS
-        assert s["kind"] in ("video", "paper", "deck")
+        assert s["kind"] in _SOURCE_KINDS
         assert isinstance(s["pct"], int)
 
 

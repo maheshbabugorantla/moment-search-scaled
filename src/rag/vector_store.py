@@ -158,12 +158,25 @@ def upsert_frames(user_id: str, video_id: str, ids: Iterable[int],
 def search(vector: np.ndarray, user_id: str, *, top_k: int,
            video_id: str | None = None,
            video_ids: list[str] | None = None) -> list[dict[str, Any]]:
+    # The video Q&A path only — the SAME exclusion search_text() applies, and
+    # for the same reason. A post's kept images live in this collection (they
+    # reuse the frame_key layout deliberately), but they carry an `anchor`
+    # instead of an `ms`: fused as video moments they produce a citation with
+    # no timestamp to seek to. Worse than a dead deeplink, the citation builder
+    # reads fr["ms"] unconditionally, so one such hit in the top-K 500s the
+    # whole answer.
+    #
+    # Guarding only the text collection was the gap: post images reach the
+    # index through the VISUAL branch, which had no kind filter at all.
+    flt = _user_filter(user_id, video_id, video_ids)
+    flt.must_not = [qm.FieldCondition(
+        key="kind", match=qm.MatchAny(any=["paper", "deck", "post"]))]
     try:
         hits = client().query_points(
             collection_name=QDRANT_COLLECTION,
             query=vector.tolist(),
             limit=top_k,
-            query_filter=_user_filter(user_id, video_id, video_ids),
+            query_filter=flt,
             with_payload=True,
             search_params=qm.SearchParams(
                 # Quantized search is lossy; rescore re-reads the full-precision
@@ -203,13 +216,17 @@ def upsert_chunks(user_id: str, video_id: str, vectors: np.ndarray,
 def search_text(vector: np.ndarray, user_id: str, *, top_k: int,
                 video_id: str | None = None,
                 video_ids: list[str] | None = None) -> list[dict[str, Any]]:
-    # The video Q&A path only. Document chunks (kind: paper/deck) share this
-    # collection but have no timestamp — fused as `t=0` "moments" they would
-    # cite a dead deeplink. They stay excluded until Epic 4 re-keys fusion on
-    # (kind, source, locator) and teaches citations to render a page/slide.
+    # The video Q&A path only. Document chunks (kind: paper/deck/post) share
+    # this collection but have no timestamp — fused as `t=0` "moments" they
+    # would cite a dead deeplink. They stay excluded until Epic 4 teaches
+    # citations to render a page, a slide or an anchor.
+    #
+    # `post` is here despite having a locator that WOULD deeplink: the anchor
+    # is real, but nothing renders it yet, and a citation nobody can follow is
+    # the same defect whatever the reason. Epic 4 lifts all three together.
     flt = _user_filter(user_id, video_id, video_ids)
-    flt.must_not = [qm.FieldCondition(key="kind",
-                                      match=qm.MatchAny(any=["paper", "deck"]))]
+    flt.must_not = [qm.FieldCondition(
+        key="kind", match=qm.MatchAny(any=["paper", "deck", "post"]))]
     try:
         hits = client().query_points(
             collection_name=TEXT_COLLECTION,
