@@ -453,10 +453,15 @@ def ask(question: str, user_id: str, *, top_k: int | None = None,
 
     # Gate 1 — confidence on the RAW per-branch bests (not the RRF score).
     # Abstain only if NEITHER what's on screen nor what's said looks relevant.
+    #
+    # `citations=[]` on every abstain path. An abstention that ships six
+    # sources is not an abstention: the UI renders them, and a reader takes
+    # "I couldn't find that" plus six confident-looking cards as a system
+    # contradicting itself.
     visual_ok = r["best_visual"] >= CONFIDENCE_THRESHOLD
     text_ok = r["best_text"] >= TEXT_CONFIDENCE_THRESHOLD
     if CONFIDENCE_THRESHOLD and not visual_ok and not text_ok:
-        result.update(answer=ABSTAIN, llm_used=False, abstained=True)
+        result.update(answer=ABSTAIN, llm_used=False, abstained=True, citations=[])
         return result
 
     cfg, source = resolve_llm(user_id)
@@ -469,9 +474,26 @@ def ask(question: str, user_id: str, *, top_k: int | None = None,
         return result
 
     moments = _build_moments(user_id, citations)
-    result["answer"] = _validate_citations(llm.answer(question, moments, cfg),
-                                           len(citations))
+    answer = _validate_citations(llm.answer(question, moments, cfg), len(citations))
+    result["answer"] = answer
     result["llm_used"] = True
     result["llm_source"] = source          # "user" = their own hosted model
     result["llm_model"] = cfg.model
+
+    # Gate 2 — an uncited answer IS an abstention.
+    #
+    # The system prompt requires every claim to carry an [n]. So a reply with
+    # no surviving reference did not ground itself in anything we retrieved,
+    # and the model — which just read all six sources in full — is a far
+    # better judge of that than any similarity threshold. Measured: the
+    # confidence gate cannot tell gibberish from a real question on this
+    # corpus (bge scores 0.60-0.73 for nonsense against 0.70-0.83 for real
+    # questions, an overlapping range), while the model answered nonsense with
+    # a 19-character refusal. It knew; nobody asked it.
+    #
+    # Returning the citations anyway was the actual defect behind "a nonsense
+    # query returns six sources": the answer said no, the payload said yes.
+    if not _CITE_RE.search(answer):
+        result["citations"] = []
+        result["abstained"] = True
     return result
