@@ -29,13 +29,28 @@ def _seconds(ms: int) -> str:
 
 
 def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
-    """Reciprocal-Rank-Fusion of the two branches into time windows.
+    """Reciprocal-Rank-Fusion of the two branches into locator windows.
 
     Raw scores are incomparable (CLIP ~0.3 vs bge ~0.7), so we rank each branch
-    on its own and score by rank: rrf = 1/(RRF_K + rank). Then we bucket hits
-    within FUSION_WINDOW_S seconds of each other (same video) into one 'moment',
-    sum their rrf, and boost windows where BOTH modalities agree — two
-    independent signals pointing at the same instant is the strongest evidence.
+    on its own and score by rank: rrf = 1/(RRF_K + rank). Then hits are
+    bucketed into windows, the rrf of the best hit per modality is summed, and
+    windows where BOTH modalities agree are boosted — two independent signals
+    pointing at the same place is the strongest evidence.
+
+    Window identity is (kind, source, locator), because "the same moment"
+    means something different per kind (REC-332):
+      * video — hits within FUSION_WINDOW_S seconds of each other in the same
+        video. Time-proximity matching, first-hit-anchored — bit-for-bit the
+        pre-multi-source behaviour, since video hits carry no `kind`.
+      * paper — hits on the same page of the same paper. Pages have no time
+        (a paper hit's `t` falls back to 0.0), so without this key every page
+        of one paper would land in one t=0 window and only the best chunk
+        would survive — one citation per paper, no matter how many distinct
+        pages matched.
+      * deck — hits on the same slide of the same deck. A slide with both
+        extracted text and a vision caption gets the same cross-modal boost a
+        frame+transcript match gets: that is a decision, not an accident —
+        two independent readings of one slide agreeing IS the same signal.
     """
     def ranked(hits, modality):
         out = []
@@ -44,15 +59,30 @@ def _fuse(visual_hits: list[dict], text_hits: list[dict]) -> list[dict]:
             out.append({**h, "modality": modality, "rrf": 1.0 / (RRF_K + rank), "t": t})
         return out
 
+    def _locator(h) -> tuple:
+        """The non-time window key for document kinds; None for video."""
+        kind = h.get("kind") or "video"
+        if kind == "paper":
+            return (kind, h["video_id"], h.get("page"))
+        if kind == "deck":
+            return (kind, h["video_id"], h.get("slide"))
+        return ()  # video: matched by time proximity below, not by this key
+
     windows: list[dict] = []
     # Hits arrive best-first (rrf desc), so the first hit landing in a window for
     # a given modality is that modality's best hit there.
     for h in sorted(ranked(visual_hits, "frame") + ranked(text_hits, "text"),
                     key=lambda x: x["rrf"], reverse=True):
-        w = next((w for w in windows if w["video_id"] == h["video_id"]
-                  and abs(w["t"] - h["t"]) <= FUSION_WINDOW_S), None)
+        loc = _locator(h)
+        if loc:
+            w = next((w for w in windows if w["locator"] == loc), None)
+        else:
+            w = next((w for w in windows if not w["locator"]
+                      and w["video_id"] == h["video_id"]
+                      and abs(w["t"] - h["t"]) <= FUSION_WINDOW_S), None)
         if w is None:
-            w = {"video_id": h["video_id"], "t": h["t"], "rrf": 0.0,
+            w = {"kind": h.get("kind") or "video", "video_id": h["video_id"],
+                 "t": h["t"], "locator": loc, "rrf": 0.0,
                  "modalities": set(), "frame": None, "text": None}
             windows.append(w)
         w["modalities"].add(h["modality"])
