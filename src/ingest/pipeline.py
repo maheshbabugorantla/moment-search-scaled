@@ -30,12 +30,14 @@ from ..rag import vector_store
 from ..rag.embeddings import embed_jpegs
 from . import fetch as fetch_mod
 from .dedup import dedup
+from .errors import SourceError, retry_unless_source_error
 from .frames import Frame, sample
 
 _UPLOAD_POOL = 8  # concurrent thumbnail PUTs (I/O-bound)
 
 
-@task(name="fetch", retries=2, retry_delay_seconds=[30, 120])
+@task(name="fetch", retries=2, retry_delay_seconds=[30, 120],
+      retry_condition_fn=retry_unless_source_error)
 def t_fetch(video_id: str, user_id: str) -> str:
     """Source video -> worker scratch file; duplicate check via source_hash.
 
@@ -45,7 +47,10 @@ def t_fetch(video_id: str, user_id: str) -> str:
     db.set_status(video_id, "fetching")
     row = db.get_video(video_id)
     if row is None:
-        raise ValueError(f"no manifest row for {video_id}")
+        # Deleted between dispatch and pickup. Deterministic — a row does not
+        # come back — so this must skip the retry ladder rather than hold a
+        # worker slot for 150s waiting to fail the same way twice more.
+        raise SourceError(f"no manifest row for {video_id}")
 
     if row["source"] == "youtube":
         path, title = fetch_mod.fetch_youtube(row["url"], video_id)
