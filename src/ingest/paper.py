@@ -122,6 +122,24 @@ def _page_count(path: Path) -> int:
     return n
 
 
+def parse_pdf(path: Path) -> list[str]:
+    """Stored bytes -> one text string per page (index 0 = page 1).
+
+    The list length always equals the page count — image-only pages yield an
+    empty string rather than being dropped, so downstream chunking can skip
+    them WITHOUT losing the true page numbering (rag/chunk.py relies on this).
+    A PDF that opens but yields no text anywhere is the caller's call to fail —
+    that's a corpus decision (OCR or reject), not a parse error.
+    """
+    import pymupdf
+
+    try:
+        with pymupdf.open(path) as doc:
+            return [page.get_text("text") for page in doc]
+    except Exception as exc:
+        raise PaperSourceError(f"unreadable PDF: {exc}") from exc
+
+
 def fetch_paper(uri: str, user_id: str, doc_id: str) -> dict:
     """URI -> scratch file + durable content-addressed object.
 
