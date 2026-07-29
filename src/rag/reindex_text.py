@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from qdrant_client.http import models as qm
 
@@ -105,25 +106,39 @@ def reindex_videos(before: dict[str, int]) -> list[str]:
     for i, r in enumerate(rows, 1):
         vid, uid = r["id"], r["user_id"]
         had = before.get(vid, 0)
-        try:
-            chunks = chunk_cues(fetch_transcript(r["url"], vid))
-            if not chunks:
-                raise RuntimeError("no captions returned")
-            vector_store.ensure_text_collection()
-            vecs = embed_docs([c["text"] for c in chunks])
-            vector_store.upsert_chunks(uid, vid, vecs, payloads=[
-                {"user_id": uid, "video_id": vid, "modality": "text",
-                 "t_start": c["t_start"], "t_end": c["t_end"],
-                 "ms": int(c["t_start"] * 1000), "text": c["text"],
-                 "embed_version": TEXT_EMBED_VERSION} for c in chunks])
-            print(f"[{i:2d}/{len(rows)}] {vid} {len(chunks):4d} chunks "
-                  f"(was {had}) {(r['title'] or '')[:44]}")
-        except Exception as exc:
-            # Loud, unlike t_transcript: during a rebuild a swallowed failure
-            # is a silently half-empty index that still reports success.
-            lost.append(vid)
-            print(f"[{i:2d}/{len(rows)}] {vid} FAILED {type(exc).__name__}: {exc} "
-                  f"(had {had} chunks)")
+        # One retry. Qdrant dropped a connection mid-rebuild on the first run
+        # ("Server disconnected without sending a response"), which cost a
+        # video its entire transcript for a blip that a second attempt clears.
+        # A rebuild is long enough that a transient failure is expected rather
+        # than exceptional, and re-running the whole job to recover one video
+        # is the wrong unit of retry.
+        for attempt in (1, 2):
+            try:
+                chunks = chunk_cues(fetch_transcript(r["url"], vid))
+                if not chunks:
+                    raise RuntimeError("no captions returned")
+                vector_store.ensure_text_collection()
+                vecs = embed_docs([c["text"] for c in chunks])
+                vector_store.upsert_chunks(uid, vid, vecs, payloads=[
+                    {"user_id": uid, "video_id": vid, "modality": "text",
+                     "t_start": c["t_start"], "t_end": c["t_end"],
+                     "ms": int(c["t_start"] * 1000), "text": c["text"],
+                     "embed_version": TEXT_EMBED_VERSION} for c in chunks])
+                note = " (retry)" if attempt == 2 else ""
+                print(f"[{i:2d}/{len(rows)}] {vid} {len(chunks):4d} chunks "
+                      f"(was {had}){note} {(r['title'] or '')[:44]}")
+                break
+            except Exception as exc:
+                if attempt == 1:
+                    print(f"[{i:2d}/{len(rows)}] {vid} retrying after "
+                          f"{type(exc).__name__}")
+                    time.sleep(5)
+                    continue
+                # Loud, unlike t_transcript: during a rebuild a swallowed
+                # failure is a silently half-empty index reporting success.
+                lost.append(vid)
+                print(f"[{i:2d}/{len(rows)}] {vid} FAILED {type(exc).__name__}: "
+                      f"{exc} (had {had} chunks)")
     return lost
 
 
@@ -158,9 +173,13 @@ def main() -> int:
 
     if args.drop:
         drop()
-    lost = reindex_videos(before)
-    if args.drop:
+        # BEFORE the video loop, not after. On the first run this sat behind
+        # ten minutes of transcript work, the connection pool timed out, and
+        # papers and posts were left marked `indexed` with zero vectors — the
+        # manifest asserting something the index could not back. Requeueing
+        # first also lets the dispatcher rebuild documents in parallel.
         requeue_documents()
+    lost = reindex_videos(before)
 
     print()
     if lost:
