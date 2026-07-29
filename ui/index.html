@@ -213,15 +213,23 @@ async function loadVideos(){
   indexedIds.forEach(id=>{ if(!KNOWN.has(id)){ KNOWN.add(id); SELECTED.add(id); }});
   [...KNOWN].forEach(id=>{ if(!indexedIds.has(id)){ KNOWN.delete(id); SELECTED.delete(id); }});
 
-  const srcLabel=v=>v.is_sample?"sample":(v.source==="youtube"?"YouTube":"upload");
+  // A source is not necessarily a video any more: `kind` names what it is, and
+  // `frame_count` counts frames for a talk but chunks for a document — so the
+  // unit is labelled per kind rather than always "f".
+  const srcLabel=v=>v.is_sample?"sample"
+    :(v.kind && v.kind!=="video") ? v.kind
+    :(v.source==="youtube"?"YouTube":"upload");
+  const unit=v=>(v.kind && v.kind!=="video")?"ch":"f";
   const pct=v=>v.progress?` ${Math.round(v.progress*100)}%`:"";
-  // A leading status indicator so each video's state is obvious at a glance.
+  // A leading status indicator so each source's state is obvious at a glance.
   function badge(v){
     switch(v.status){
-      case "indexed":   return {icon:"✓", label:`${v.frame_count||0}f · ${srcLabel(v)}`, c:"text-[#1f7a43]"};
+      case "indexed":   return {icon:"✓", label:`${v.frame_count||0}${unit(v)} · ${srcLabel(v)}`, c:"text-[#1f7a43]"};
       case "pending":   return {icon:"◷", label:"waiting (fair queue)", c:"text-[#8a6d1a]"};
       case "queued":    return {icon:"◷", label:"queued",           c:"text-[#8a6d1a]"};
-      case "fetching":  return {icon:"⏬", label:"fetching video…",  c:"text-[#8a6d1a]"};
+      case "fetching":  return {icon:"⏬", label:"fetching…",        c:"text-[#8a6d1a]"};
+      case "parsing":   return {icon:"⏳", label:"parsing",          c:"text-[#8a6d1a]"};
+      case "chunking":  return {icon:"⏳", label:"chunking",         c:"text-[#8a6d1a]"};
       case "sampling":  return {icon:"⏳", label:"sampling"+pct(v),  c:"text-[#8a6d1a]"};
       case "embedding": return {icon:"⏳", label:"embedding"+pct(v), c:"text-[#8a6d1a]"};
       case "failed":    return {icon:"⚠", label:"failed",           c:"text-coral2"};
@@ -364,28 +372,47 @@ $("#go").onclick=async()=>{
   finally{ $("#go").disabled=false; $("#go").textContent="→"; }
 };
 
+/* ---------- per-kind citation rendering (REC-317) ----------
+   A citation is only worth showing if a reader can tell WHAT it is and WHERE
+   it points. Each kind gets its own badge, its own placeholder art when there
+   is no image, and its own way of being opened — a talk seeks a player, a
+   paper opens a PDF at a page, a post scrolls to a heading. */
+const KIND_STYLE = {
+  video: {badge:"talk",  cls:"bg-coral/15 text-coral2",       icon:"▶"},
+  paper: {badge:"paper", cls:"bg-[#dfe3f5] text-[#3d4a8a]",   icon:"📄"},
+  deck:  {badge:"deck",  cls:"bg-[#f6e3cd] text-[#8a5a20]",   icon:"▦"},
+  post:  {badge:"post",  cls:"bg-[#cfe8d6] text-[#1f7a43]",   icon:"✎"},
+};
+const kindOf = c => KIND_STYLE[c.kind] || KIND_STYLE.video;
+
 function renderSources(){
   $("#sources").innerHTML=CITES.map(c=>{
+    const k = kindOf(c);
     const mods=(c.modalities||[]);
     const tags=mods.map(m=>m==="frame"
       ? '<span class="text-[9px] px-1 rounded bg-coral/15 text-coral2">seen</span>'
       : '<span class="text-[9px] px-1 rounded bg-[#cfe8d6] text-[#1f7a43]">said</span>').join(" ");
-    // Text-only moments have no frame; they're always YouTube, so fall back to
-    // the video's thumbnail instead of an empty "(no frame)" placeholder.
-    const yid = ytId(c);
+    // A YouTube fallback thumbnail only makes sense for a video. A paper with
+    // no image gets the kind's own placeholder rather than a still from some
+    // unrelated talk.
+    const yid = c.kind === "video" ? ytId(c) : null;
     const img = c.thumbnail || (yid ? `https://img.youtube.com/vi/${yid}/hqdefault.jpg` : null);
     const thumb = img
       ? `<img loading="lazy" src="${esc(img)}" class="w-full h-full object-cover" onerror="this.style.opacity=0">`
-      : `<div class="w-full h-full flex items-center justify-center text-muted text-xs p-2 text-center">transcript moment<br>(no frame)</div>`;
+      : `<div class="w-full h-full flex flex-col items-center justify-center text-muted gap-1">
+           <span class="text-2xl opacity-50">${k.icon}</span>
+           <span class="text-[10px]">${esc(c.label||k.badge)}</span>
+         </div>`;
     const quote = c.transcript
       ? `<div class="text-[11px] text-muted italic mt-1 line-clamp-2">“${esc(c.transcript)}”</div>` : "";
     return `
     <button class="source text-left bg-card border border-line rounded-2xl overflow-hidden shadow-sm hover:border-coral transition" data-n="${c.n}">
       <div class="aspect-video bg-paper2 overflow-hidden">${thumb}</div>
       <div class="p-3">
-        <div class="flex items-center gap-2 mb-1">
+        <div class="flex items-center gap-2 mb-1 flex-wrap">
           <span class="text-[10px] font-bold text-white bg-coral rounded px-1.5 py-0.5">${c.n}</span>
-          <span class="text-[11px] text-muted">${esc(c.timestamp)}</span>
+          <span class="text-[9px] px-1 rounded ${k.cls}">${k.badge}</span>
+          <span class="text-[11px] text-muted">${esc(c.label||"")}</span>
           ${tags}
           <span class="text-[11px] text-muted ml-auto">score ${c.score}</span>
         </div>
@@ -399,12 +426,41 @@ function renderSources(){
 /* ---------- moment player (YouTube embed seeked to second, or <video> for uploads) ---------- */
 function ytId(c){ if(c.video_id&&c.video_id.startsWith("yt_")) return c.video_id.slice(3);
   const m=(c.url||"").match(/(?:youtu\.be\/|v=)([\w-]{11})/); return m?m[1]:null; }
+function openCitation(n){
+  /* A document citation has no timeline, so there is nothing to seek and no
+     player to open. Show what matched and offer the deeplink — or say plainly
+     that there isn't one, rather than render a link that goes nowhere. */
+  const c=CITES.find(x=>x.n===n); if(!c)return;
+  const k=kindOf(c);
+  $("#mTitle").textContent=c.title||c.video_id;
+  $("#mMeta").textContent=`${k.badge} · ${c.label||""}`;
+  const box=$("#playerBox");
+  box.className="bg-paper2 shrink-0 overflow-auto max-h-[46vh]";
+  box.innerHTML = c.thumbnail
+    ? `<img src="${esc(c.thumbnail)}" class="w-full object-contain max-h-[46vh]" alt="matched figure">`
+    : `<div class="p-5 text-sm leading-relaxed">${esc(c.transcript||"(no excerpt)")}</div>`;
+  $("#mFrame").style.display="none";
+  $("#mFrameLabel").textContent = c.thumbnail ? "Matched figure" : "Matched text";
+  $("#mFrameDesc").textContent = c.deeplink
+    ? `Opens the ${k.badge} at ${c.label||"this location"}.`
+    : "This source has no public URL on record, so there is nowhere to link to "
+      + "— the excerpt above is the evidence the answer used.";
+  const out=$("#mOut");
+  out.href=c.deeplink||"#";
+  out.textContent = c.deeplink ? "Open source ↗" : "No link available";
+  out.classList.toggle("pointer-events-none", !c.deeplink);
+  out.classList.toggle("opacity-50", !c.deeplink);
+  $("#modal").classList.remove("hidden"); document.body.style.overflow="hidden";
+}
+
 function playCitation(n){
   const c=CITES.find(x=>x.n===n); if(!c)return;
+  if(c.kind && c.kind!=="video") return openCitation(n);
   const secs=Math.floor((c.ms||0)/1000);
   $("#mTitle").textContent=c.title||c.video_id;
-  $("#mMeta").textContent = c.transcript ? `“${c.transcript}”` : `Moment at ${c.timestamp}`;
-  const box=$("#playerBox"); const yid=ytId(c);
+  $("#mMeta").textContent = c.transcript ? `“${c.transcript}”` : `Moment at ${c.label}`;
+  const box=$("#playerBox"); box.className="bg-black aspect-video shrink-0";
+  const yid=ytId(c);
   // Frame preview if we have one; otherwise (text-only YouTube moment) the
   // video's thumbnail, so the modal never shows an empty preview.
   const preview = c.thumbnail || (yid ? `https://img.youtube.com/vi/${yid}/hqdefault.jpg` : null);
@@ -434,8 +490,14 @@ document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
 $("#article").addEventListener("click",e=>{ const c=e.target.closest(".cite"); if(c) playCitation(+c.dataset.n); });
 
 /* examples */
-const EXAMPLES=["a diagram of the attention mechanism","an animation of a neural network",
-  "a slide listing examples of large language models","a person speaking on stage next to slides"];
+/* The front page queries only the sample talks, so its examples stay visual.
+   /get-started searches everything indexed, where the interesting questions
+   are the ones a talk and a written source answer together. */
+const EXAMPLES = (window.MS_MODE==="full")
+  ? ["how should you choose what to work on?","the economics of AI data centre capex",
+     "how do you evaluate an LLM application?","what makes a moat in AI?"]
+  : ["a diagram of the attention mechanism","an animation of a neural network",
+     "a slide listing examples of large language models","a person speaking on stage next to slides"];
 $("#examples").innerHTML=EXAMPLES.map(q=>`<span class="chip">${esc(q)}</span>`).join("");
 $("#examples").querySelectorAll(".chip").forEach(c=>c.onclick=()=>{ qEl.value=c.textContent; autogrow(); qEl.focus(); });
 

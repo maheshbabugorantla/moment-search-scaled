@@ -112,6 +112,9 @@ _PUBLIC_FIELDS = {
     "id", "source", "url", "title", "status", "error", "frame_count",
     "progress", "attempts", "created_at", "updated_at", "is_sample",
 }
+# Added by Epic 4 — the manifest lists every kind now, so a client can no
+# longer assume "video" and read `source` to tell YouTube from upload.
+_EPIC4_VIDEO_FIELDS = {"kind"}
 
 
 def test_list_videos_exposes_the_public_field_set(client: httpx.Client) -> None:
@@ -120,7 +123,7 @@ def test_list_videos_exposes_the_public_field_set(client: httpx.Client) -> None:
     videos = r.json()["videos"]
     assert videos, "no videos in the manifest — is the corpus indexed?"
     for v in videos:
-        assert set(v) == _PUBLIC_FIELDS
+        assert set(v) == _PUBLIC_FIELDS | _EPIC4_VIDEO_FIELDS
 
 
 def test_corpus_talks_are_indexed(client: httpx.Client) -> None:
