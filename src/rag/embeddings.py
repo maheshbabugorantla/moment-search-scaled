@@ -121,13 +121,30 @@ def _openai_embed_client():
                   base_url=config.TEXT_EMBED_BASE_URL or None)
 
 
+# Inputs per embeddings request. The API caps a request at 2048 inputs and
+# ~300k tokens; a whole lecture transcript is ~200 chunks and comfortably
+# inside the first limit while approaching the second, and the caller that
+# would hit it (a full re-index) is exactly the one that must not fail
+# halfway. Batching here rather than at each call site means every caller —
+# the paper flow, the post flow, the re-index — gets it once.
+_OPENAI_EMBED_BATCH = 128
+
+
 def embed_openai(texts: list[str]) -> np.ndarray:
     """Embed text (docs or query) via the OpenAI embeddings API, L2-normalized."""
     if not texts:
         return np.zeros((0, config.TEXT_EMBED_DIM), dtype=np.float32)
-    resp = _openai_embed_client().embeddings.create(
-        model=config.TEXT_EMBED_MODEL, input=texts)
-    return _normalize(np.asarray([d.embedding for d in resp.data], dtype=np.float32))
+    client = _openai_embed_client()
+    out: list[list[float]] = []
+    for i in range(0, len(texts), _OPENAI_EMBED_BATCH):
+        resp = client.embeddings.create(model=config.TEXT_EMBED_MODEL,
+                                        input=texts[i:i + _OPENAI_EMBED_BATCH])
+        # `data` is documented as index-ordered, but the order IS the mapping
+        # from vector back to chunk — and a silently permuted batch would
+        # attach every citation to the wrong passage, which no test would
+        # catch. Sorting by the index the API returns costs nothing.
+        out.extend(d.embedding for d in sorted(resp.data, key=lambda d: d.index))
+    return _normalize(np.asarray(out, dtype=np.float32))
 
 
 # ── Remote inference (CLIP_SERVICE_URL set) ──────────────────────────────────

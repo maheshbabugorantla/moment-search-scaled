@@ -169,6 +169,40 @@ def test_a_nonsense_question_does_not_invent_an_answer(
     assert body.get("abstained") is True, (
         f"answered nonsense with {len(body['citations'])} citations: "
         f"{body.get('answer', '')[:200]}")
+    assert body["citations"] == [], (
+        "an abstention that ships citations is not an abstention — the UI "
+        "renders them under 'I couldn't find that'")
+
+
+def test_nonsense_is_refused_without_paying_for_a_model_call(
+    client: httpx.Client, multikind: set[str]
+) -> None:
+    """REC-340's verify. Gate 2 (an uncited answer is an abstention) catches
+    nonsense correctly but only AFTER a full multimodal generation. Gate 1 is
+    the free check, and it was dead for the entire life of this repo — every
+    threshold sat below every score either model emits.
+
+    It works now only because text-embedding-3-small's cosines spread widely
+    enough to separate: gibberish 0.278-0.362 against real questions
+    0.413-0.710. Under bge those ranges overlapped and no constant could do
+    this, which is why the assertion is here and not in the earlier suite.
+    """
+    body = _ask(client, NONSENSE)
+    assert body.get("llm_used") is False, (
+        "nonsense reached the LLM — Gate 1 is not firing, so every hopeless "
+        "query costs a full multimodal generation before being discarded")
+
+
+def test_the_gate_does_not_refuse_real_questions(
+    client: httpx.Client, multikind: set[str]
+) -> None:
+    """The other half, and the reason a threshold cannot simply be raised
+    until nonsense stops: a gate tuned too tight abstains on questions the
+    corpus genuinely answers, which is the worse failure of the two."""
+    for q in QUESTIONS:
+        body = _ask(client, q)
+        assert not body.get("abstained"), f"abstained on a real question: {q!r}"
+        assert body["citations"], f"no citations for {q!r}"
 
 
 def test_the_abstention_does_not_claim_the_corpus_is_only_video(

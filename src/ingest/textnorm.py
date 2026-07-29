@@ -174,3 +174,85 @@ def typography_report(text: str) -> dict[str, int]:
                 counts["presentation_form"] += 1
     counts["hyphen_breaks"] = len(_HYPHEN_BREAK.findall(text))
     return dict(counts)
+
+
+# ── Speech normalization (the TRANSCRIPT branch) ─────────────────────────────
+#
+# Same concern as the typography rules above, one modality over: extracted text
+# that carries artifacts of how it was produced rather than what it means. A
+# PDF gives you ligatures and line-break hyphens; auto-captioned speech gives
+# you filler and stutters.
+#
+# Why it matters, measured (REC-342): asked "Gen AI Value capture", a Stanford
+# lecture ENTIRELY about that subject did not appear in the text branch's top
+# 60, losing to blog posts on the same topic by 0.14 cosine. Its transcript is
+# on point — gross margins, marginal cost near zero, monetisation per user —
+# but 6% of its words are filler: 106 "uh", 87 "um", 53 "you know" and 69
+# immediate repetitions across 5,969 words. Switching to
+# text-embedding-3-small did not close the gap (0.141 vs 0.145), which is what
+# makes this a text problem rather than a model one.
+#
+# Deliberately conservative. Only interjections that carry no meaning in any
+# context are removed. "like", "right", "okay", "actually", "basically",
+# "I mean", "sort of" and "kind of" all stay, because each has a reading where
+# it is the content ("a kind of transformer", "the right answer") and a
+# normalizer that strips meaning is worse than the filler it removes.
+
+# Interjections with no meaning in any context, including their elongations
+# ("ummm"). Not "ah"/"oh" — those carry realisation, and appear inside quoted
+# speech in talks.
+_FILLER = re.compile(
+    r"\b(?:u+m+|u+h+|e+r+m*|h+m+|mhm+)\b[\s,]*", re.IGNORECASE)
+
+# "you know" as a parenthetical. Excluded when it is a real clause — a
+# question ("do you know") or a complement ("if/that you know") — which is the
+# whole reason this is a lookbehind rather than a plain replace.
+_YOU_KNOW = re.compile(
+    r"(?<!\bdo\s)(?<!\bdid\s)(?<!\bif\s)(?<!\bthat\s)(?<!\bnot\s)"
+    r"\byou\s+know\b[\s,]*", re.IGNORECASE)
+
+# A word repeated immediately ("the the", "is is is"). Speech restarts, not
+# emphasis; genuine English doubling ("had had", "that that") is rare enough
+# in a lecture transcript to be worth losing.
+_STUTTER = re.compile(r"\b(\w+)(\s+\1\b)+", re.IGNORECASE)
+
+_SPACE_BEFORE_PUNCT = re.compile(r"\s+([,.;:!?])")
+_MULTI_SPACE = re.compile(r"[ \t]{2,}")
+# Removing a filler leaves its punctuation behind: "um. the answer" -> ". the
+# answer", "well, um, so" -> "well,, so". Cosmetic for a reader, but the
+# chunk text is quoted back verbatim in a citation, so it should read as a
+# sentence someone said.
+_LEADING_PUNCT = re.compile(r"^[\s,;:.!?]+")
+_DOUBLED_PUNCT = re.compile(r"([,;:])\s*(?=[,;:.])")
+
+
+def normalize_speech(text: str) -> str:
+    """Strip caption filler so a transcript chunk embeds on what was said.
+
+    Order matters: filler goes first (so "um the the" leaves "the the" for the
+    stutter rule to catch), then stutters, then the whitespace and punctuation
+    left behind by both.
+    """
+    out = _FILLER.sub(" ", text)
+    out = _YOU_KNOW.sub(" ", out)
+    # Twice: "the the the" collapses to "the the" on a single pass in the
+    # overlapping case, and a lecture restart is often three words long.
+    out = _STUTTER.sub(r"\1", out)
+    out = _STUTTER.sub(r"\1", out)
+    out = _MULTI_SPACE.sub(" ", out)
+    out = _SPACE_BEFORE_PUNCT.sub(r"\1", out)
+    out = _DOUBLED_PUNCT.sub("", out)
+    return _LEADING_PUNCT.sub("", out).strip()
+
+
+def speech_report(text: str) -> dict[str, int]:
+    """What was removed, for the ingest log — the transcript counterpart of
+    typography_report, and the number that tells you whether a re-embed is
+    worth it before you run one."""
+    return {
+        "filler": len(_FILLER.findall(text)),
+        "you_know": len(_YOU_KNOW.findall(text)),
+        "stutters": len(_STUTTER.findall(text)),
+        "words_before": len(text.split()),
+        "words_after": len(normalize_speech(text).split()),
+    }

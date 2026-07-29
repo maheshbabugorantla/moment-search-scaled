@@ -88,9 +88,45 @@ def _user_filter(user_id: str, video_id: str | None = None,
     return qm.Filter(must=must)
 
 
+class DimensionMismatch(RuntimeError):
+    """The live collection's vector size disagrees with the configured model."""
+
+
+def _check_dim(collection: str, dim: int) -> None:
+    """Refuse to run against a collection built for a different model.
+
+    Changing TEXT_EMBED_MODEL changes TEXT_EMBED_DIM (bge is 384,
+    text-embedding-3-small 1536). `_ensure` only CREATES when the collection is
+    absent, so on a dimension change it silently leaves the old one in place
+    and every upsert fails deep inside the Qdrant client with a message about
+    vector sizes — which reads like an embedding bug, not a schema one, and
+    sends you looking in the wrong module.
+
+    Deliberately raises rather than dropping. A dimension mismatch is
+    ambiguous: it means either "I meant to change models" or "I typo'd an env
+    var", and one of those readings costs the entire index. Rebuilding is an
+    explicit operator action, and the message says exactly what to run.
+    """
+    c = client()
+    try:
+        info = c.get_collection(collection)
+        cfg = info.config.params.vectors
+        live = cfg.size if hasattr(cfg, "size") else None
+    except Exception:
+        return  # unreadable or absent — _ensure handles creation
+    if live is not None and live != dim:
+        raise DimensionMismatch(
+            f"{collection} holds {live}-d vectors but the configured embedding "
+            f"model wants {dim}-d. Nothing has been changed. Either restore the "
+            f"previous TEXT_EMBED_MODEL / TEXT_EMBED_DIM, or rebuild the "
+            f"collection and re-index every source:\n"
+            f"    python -m src.rag.reindex_text --drop")
+
+
 def _ensure(collection: str, dim: int) -> None:
     """Create a collection (low-RAM profile) + tenant/video payload indexes."""
     c = client()
+    _check_dim(collection, dim)
     if not c.collection_exists(collection):
         c.create_collection(
             collection_name=collection,
