@@ -93,6 +93,17 @@ def t_parse_post(doc_id: str, path: str, title: str) -> dict:
     # URI may be a storage:// key no reader can follow. Prefer the former for
     # the deeplink, and adopt the exported title when the operator gave none.
     title = title or meta.get("title", "")
+    source_url = meta.get("url", "")
+    # Onto the manifest row, not just the point payloads: a citation whose only
+    # hit is an IMAGE never reads a text payload, and the row's `uri` is the
+    # fixture host we fetched from. Written at parse rather than at index so a
+    # run that dies later still leaves the row pointing somewhere followable.
+    # The title rides along: without it a citation reads `doc_92dd5404a31c`,
+    # because the operator registering a URI rarely types one and nothing else
+    # in the flow ever wrote the exported title back to the row.
+    db.set_status(doc_id, "parsing", title=title or None,
+                  url=source_url if source_url.startswith(("http://", "https://"))
+                      else None)
     sections = parse_markdown(body, title=title)
     if not any(s.paragraphs for s in sections):
         # Markdown that parsed but carries no prose: an image dump, or a link
@@ -110,7 +121,7 @@ def t_parse_post(doc_id: str, path: str, title: str) -> dict:
     # frozen dataclasses so a resumed run deserialises without importing them.
     return {
         "title": title,
-        "source_url": meta.get("url", ""),
+        "source_url": source_url,
         "author": meta.get("author", ""),
         "sections": [{"anchor": s.anchor, "heading": s.heading,
                       "anchor_native": s.anchor_native,

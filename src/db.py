@@ -157,7 +157,16 @@ def set_status(video_id: str, status: str, *, error: str | None = None,
                title: str | None = None, frame_count: int | None = None,
                source_hash: str | None = None, embed_version: str | None = None,
                progress: float | None = None,
-               storage_key: str | None = None) -> None:
+               storage_key: str | None = None, url: str | None = None) -> None:
+    """`url` is the PUBLIC address of the source, not where we fetched it from.
+
+    For a video that has always been the YouTube watch URL. A document's `uri`
+    is wherever ingestion could reach the bytes — a `storage://` key, a fixture
+    host on the compose network — and none of those are addresses a reader can
+    follow, so a citation built from `uri` deeplinks nowhere. A post's exported
+    front matter knows its canonical URL; writing it here means the citation
+    builder joins metadata once, by kind, through videos_by_ids().
+    """
     with pool().connection() as conn:
         conn.execute(
             """
@@ -167,12 +176,13 @@ def set_status(video_id: str, status: str, *, error: str | None = None,
                 source_hash = COALESCE(%s, source_hash),
                 embed_version = COALESCE(%s, embed_version),
                 storage_key = COALESCE(%s, storage_key),
+                url = COALESCE(%s, url),
                 progress = %s,
                 updated_at = now()
             WHERE id = %s
             """,
             (status, error, title, frame_count, source_hash, embed_version,
-             storage_key, progress, video_id),
+             storage_key, url, progress, video_id),
         )
 
 
