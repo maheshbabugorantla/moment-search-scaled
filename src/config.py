@@ -129,10 +129,14 @@ POST_EMBED_BATCH = _int("POST_EMBED_BATCH", 64)
 # without touching the flow — the classifier is the newest code here, so it
 # gets a switch.
 POST_INDEX_IMAGES = _envbool("POST_INDEX_IMAGES", True)
-# Heuristic layer: hard drops, no model involved.
-POST_IMAGE_MIN_PX = _int("POST_IMAGE_MIN_PX", 200)        # icons, tracking pixels
-POST_IMAGE_MAX_ASPECT = _float("POST_IMAGE_MAX_ASPECT", 4.0)  # banners, dividers
+# Heuristic layer. Only the unambiguous shapes are hard drops: an animated GIF
+# is a reaction image, and anything thinner than this on a side is an icon, a
+# badge or a tracking pixel.
+POST_IMAGE_MIN_PX = _int("POST_IMAGE_MIN_PX", 200)
 POST_IMAGE_MAX_MB = _int("POST_IMAGE_MAX_MB", 10)
+# Wider than this is banner-SHAPED, which is a demotion rather than a veto —
+# see POST_IMAGE_WIDE_PENALTY below for why it stopped being a hard drop.
+POST_IMAGE_MAX_ASPECT = _float("POST_IMAGE_MAX_ASPECT", 4.0)
 # CLIP layer: informative must BEAT decorative by a margin and clear a floor.
 # "Closer to chart than to photo" is a weaker claim than "is a chart", which is
 # why both conditions exist. The floor sits in the same ballpark as
@@ -143,6 +147,13 @@ POST_IMAGE_MIN_SCORE = _float("POST_IMAGE_MIN_SCORE", 0.22)
 # HIGHER floor rather than a hard drop — a rare post leads with its key chart,
 # and vetoing position 0 would lose exactly the image most worth citing.
 POST_IMAGE_HERO_PENALTY = _float("POST_IMAGE_HERO_PENALTY", 0.03)
+# Banner-SHAPED gets the same treatment, and for a measured reason: on the
+# first real seven-post corpus, every image the aspect rule vetoed outright
+# was a genuine figure — a horizontal number line at 4.8:1, a
+# Data->Model->Product flow diagram at 5.9:1 that was the most citable image
+# in its post. Both score ~0.27 informative. Wide decorative strips are almost
+# always thin in absolute terms too, so POST_IMAGE_MIN_PX still vetoes them.
+POST_IMAGE_WIDE_PENALTY = _float("POST_IMAGE_WIDE_PENALTY", 0.03)
 # Alt text that names a figure ("chart", "diagram", "table") relaxes the floor.
 # A heuristic rather than a second embedding on purpose: scoring alt text in
 # CLIP space would mix text-text and text-image cosines, which live on

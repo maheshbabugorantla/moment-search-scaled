@@ -69,10 +69,22 @@ def test_a_short_divider_strip_is_dropped_for_being_thin() -> None:
     assert "too small" in shape_is_junk(1200, 100, animated=False)
 
 
-def test_a_tall_banner_is_dropped_for_its_aspect_ratio() -> None:
-    """The case only the aspect rule catches: big enough in both dimensions,
-    still a header strip nobody would cite."""
-    assert "banner-shaped" in shape_is_junk(1600, 300, animated=False)
+def test_a_wide_image_is_demoted_but_never_hard_dropped() -> None:
+    """Measured on real posts: every image the aspect rule VETOED was a
+    genuine figure — a horizontal number line at 4.8:1, a flow diagram at
+    5.9:1. Wide raises the bar and lets the classifier decide, exactly as
+    position 0 does."""
+    assert shape_is_junk(1600, 300, animated=False) == ""   # no hard drop
+    assert post_images.is_wide(1600, 300) is True
+    assert post_images.is_wide(600, 400) is False
+
+
+def test_a_wide_figure_survives_the_demotion_but_a_wide_strip_does_not() -> None:
+    diagram = _vec(0.27, 0.05)   # the measured score of the real flow diagram
+    filler = _vec(0.23, 0.05)    # clears the normal floor, not the raised one
+    assert classify(diagram, _PROMPTS, hero=False, alt="", wide=True)[0] is True
+    assert classify(filler, _PROMPTS, hero=False, alt="", wide=True)[0] is False
+    assert classify(filler, _PROMPTS, hero=False, alt="", wide=False)[0] is True
 
 
 def test_an_icon_is_dropped() -> None:
@@ -119,7 +131,7 @@ def test_decoding_reports_the_original_shape_and_downscales() -> None:
 
 def test_a_narrow_banner_decodes_then_fails_a_shape_rule() -> None:
     """Decoding reports the ORIGINAL dimensions, so downscaling to THUMB_WIDTH
-    cannot launder a banner past the shape rules."""
+    cannot launder a divider past the shape rules."""
     _, width, height, animated = post_images._to_jpeg(_png(1200, 100))
     assert shape_is_junk(width, height, animated)
 

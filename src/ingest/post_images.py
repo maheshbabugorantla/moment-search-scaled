@@ -56,7 +56,8 @@ import numpy as np
 from ..config import (POST_IMAGE_ALT_BONUS, POST_IMAGE_HERO_PENALTY,
                       POST_IMAGE_MARGIN, POST_IMAGE_MAX_ASPECT,
                       POST_IMAGE_MAX_MB, POST_IMAGE_MIN_PX,
-                      POST_IMAGE_MIN_SCORE, THUMB_WIDTH)
+                      POST_IMAGE_MIN_SCORE, POST_IMAGE_WIDE_PENALTY,
+                      THUMB_WIDTH)
 
 _TIMEOUT_S = 20
 
@@ -117,19 +118,39 @@ def _fetch(url: str) -> bytes:
 
 
 def shape_is_junk(width: int, height: int, animated: bool) -> str:
-    """A drop reason from the decoded image's shape, or ""."""
+    """A hard drop reason from the decoded image's shape, or "".
+
+    Only two shapes are vetoed outright, because only two are unambiguous: an
+    animated GIF is a reaction image, and anything under POST_IMAGE_MIN_PX on
+    a side is an icon, a badge or a tracking pixel. Wide is NOT a veto — see
+    is_wide().
+    """
     if animated:
         return "animated GIF"
     if min(width, height) < POST_IMAGE_MIN_PX:
         return f"too small ({width}x{height}, under {POST_IMAGE_MIN_PX}px)"
-    ratio = max(width, height) / max(1, min(width, height))
-    if ratio > POST_IMAGE_MAX_ASPECT:
-        return f"banner-shaped ({width}x{height}, {ratio:.1f}:1)"
     return ""
 
 
+def is_wide(width: int, height: int) -> bool:
+    """Wide enough to be a banner — a DEMOTION, not a veto.
+
+    This started as a hard drop and was wrong on real data. Across the first
+    seven-post corpus every image the aspect rule vetoed was a genuine figure:
+    a horizontal number line at 4.8:1, a Data->Model->Product flow diagram at
+    5.9:1 — the single most citable image in its post. Both score ~0.27
+    informative, well clear of the floor.
+
+    Wide diagrams (timelines, comparison strips, flow charts) are common and
+    citable; wide *decorative* strips are almost always thin in absolute terms
+    as well, so the minimum-dimension veto above already catches them. So this
+    raises the bar and lets the classifier decide, exactly as position 0 does.
+    """
+    return max(width, height) / max(1, min(width, height)) > POST_IMAGE_MAX_ASPECT
+
+
 def classify(vector: np.ndarray, prompt_vectors: dict[str, np.ndarray], *,
-             hero: bool, alt: str) -> tuple[bool, str, float]:
+             hero: bool, alt: str, wide: bool = False) -> tuple[bool, str, float]:
     """CLIP verdict for one already-embedded image.
 
     Returns (keep, img_class, informative_score). Vectors are L2-normalized by
@@ -143,7 +164,9 @@ def classify(vector: np.ndarray, prompt_vectors: dict[str, np.ndarray], *,
 
     floor = POST_IMAGE_MIN_SCORE
     if hero:
-        floor += POST_IMAGE_HERO_PENALTY   # demoted, not vetoed
+        floor += POST_IMAGE_HERO_PENALTY   # cover art: demoted, not vetoed
+    if wide:
+        floor += POST_IMAGE_WIDE_PENALTY   # banner-shaped: likewise
     if _ALT_INFORMATIVE.search(alt or ""):
         floor -= POST_IMAGE_ALT_BONUS      # the author named it a figure
 
@@ -220,9 +243,12 @@ def judge(url: str, *, base_uri: str = "", alt: str = "", hero: bool = False,
     except Exception as exc:
         return Verdict(keep=False, reason=f"classifier unavailable: {type(exc).__name__}")
 
-    keep, img_class, score = classify(vector, prompts, hero=hero, alt=alt)
-    reason = (f"{img_class} ({score:.3f})" if not hero
-              else f"{img_class} ({score:.3f}, hero floor)")
+    wide = is_wide(width, height)
+    keep, img_class, score = classify(vector, prompts, hero=hero, alt=alt,
+                                      wide=wide)
+    raised = ", ".join(w for w, on in (("hero", hero), ("wide", wide)) if on)
+    reason = (f"{img_class} ({score:.3f}, {raised} floor)" if raised
+              else f"{img_class} ({score:.3f})")
     return Verdict(keep=keep, reason=reason, img_class=img_class,
                    img_score=score, jpeg=jpeg if keep else b"",
                    vector=vector if keep else None)
