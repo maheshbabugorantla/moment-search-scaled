@@ -123,19 +123,27 @@ def _page_count(path: Path) -> int:
 
 
 def parse_pdf(path: Path) -> list[str]:
-    """Stored bytes -> one text string per page (index 0 = page 1).
+    """Stored bytes -> one NORMALIZED text string per page (index 0 = page 1).
 
     The list length always equals the page count — image-only pages yield an
     empty string rather than being dropped, so downstream chunking can skip
     them WITHOUT losing the true page numbering (rag/chunk.py relies on this).
     A PDF that opens but yields no text anywhere is the caller's call to fail —
     that's a corpus decision (OCR or reject), not a parse error.
+
+    Pages go through textnorm.normalize_page before anything sees them:
+    pymupdf returns what the page LOOKS like, which includes ligature glyphs
+    and typesetter hyphenation that are not part of the words. Normalizing
+    here rather than at chunk time means chunk boundaries — and the point ids
+    derived from them — are computed from clean text.
     """
     import pymupdf
 
+    from .textnorm import normalize_page
+
     try:
         with pymupdf.open(path) as doc:
-            return [page.get_text("text") for page in doc]
+            return [normalize_page(page.get_text("text")) for page in doc]
     except Exception as exc:
         raise PaperSourceError(f"unreadable PDF: {exc}") from exc
 
